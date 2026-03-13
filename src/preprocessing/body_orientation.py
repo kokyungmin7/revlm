@@ -8,6 +8,7 @@ MEBOW source code must be cloned first:
 
 Reference: https://github.com/ChenyanWu/MEBOW
 """
+import importlib
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -50,7 +51,7 @@ def load_mebow_model(
         sys.path.insert(0, tools_path)
 
     try:
-        import models  # noqa: F401 — MEBOW internal
+        importlib.import_module("models")
         from config import cfg, update_config  # noqa: F401 — MEBOW internal
     except ImportError as e:
         raise ImportError(
@@ -78,7 +79,8 @@ def load_mebow_model(
         cfg.TEST.MODEL_FILE = model_path
         cfg.freeze()
 
-    model = eval("models." + cfg.MODEL.NAME + ".get_pose_net")(cfg, is_train=False)
+    model_module = importlib.import_module("models." + cfg.MODEL.NAME)
+    model = model_module.get_pose_net(cfg, is_train=False)
     model = model.to(device)
 
     state_dict = torch.load(cfg.TEST.MODEL_FILE, map_location=torch.device(device))
