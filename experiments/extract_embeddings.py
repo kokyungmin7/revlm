@@ -33,14 +33,13 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-# Ensure src/ is importable regardless of working directory
+# Ensure project root is importable (same convention as tests/smoke/)
 _repo_root = Path(__file__).resolve().parent.parent
-_src_root = str(_repo_root / "src")
-if _src_root not in sys.path:
-    sys.path.insert(0, _src_root)
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
-from models.reid import extract_embedding, load_reid_model
-from preprocessing.body_orientation import load_mebow_model, predict_orientation
+from src.models.reid import extract_embedding, load_reid_model
+from src.preprocessing.body_orientation import load_mebow_model, predict_orientation
 
 _SPLITS = ("bounding_box_train", "bounding_box_test", "query")
 _FILENAME_RE = re.compile(r"^(\d+)_c(\d+)_f(\d+)\.jpg$", re.IGNORECASE)
