@@ -16,8 +16,9 @@ docs/PLANNING.md
 # 외부 라이브러리 소스 (scripts/setup_mebow.py로 설치)
 third_party/
 
-# 실험 결과 및 샘플/원시 데이터
-experiments/
+# 실험 결과 및 샘플/원시 데이터 (스크립트는 추적)
+experiments/*
+!experiments/*.py
 WB_WoB-ReID_sample/
 data/
 
