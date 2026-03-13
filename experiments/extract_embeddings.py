@@ -185,13 +185,14 @@ def main() -> None:
     print(f"      ReID model loaded on {device}")
 
     mebow_cfg = str(args.mebow_cfg) if args.mebow_cfg else None
-    mebow_weights = str(args.mebow_weights) if args.mebow_weights else None
-    mebow_model, _ = load_mebow_model(
+    mebow_kwargs: dict = dict(
         mebow_root=str(args.mebow_root),
         cfg_path=mebow_cfg,
-        model_path=mebow_weights,
         device=device,
     )
+    if args.mebow_weights:
+        mebow_kwargs["model_path"] = str(args.mebow_weights)
+    mebow_model, _ = load_mebow_model(**mebow_kwargs)
     print("      MEBOW model loaded")
 
     # ── extract features ──────────────────────────────────────────────────────

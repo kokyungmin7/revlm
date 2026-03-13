@@ -22,7 +22,7 @@ import torchvision.transforms as transforms
 def load_mebow_model(
     mebow_root: str = "./third_party/MEBOW",
     cfg_path: str | None = None,
-    model_path: str | None = None,
+    model_path: str = "./models/body_orientation/model_hboe.pth",
     device: str | None = None,
 ) -> tuple[Any, str]:
     """Load the MEBOW model for body orientation estimation.
@@ -30,7 +30,7 @@ def load_mebow_model(
     Args:
         mebow_root: Path to the cloned MEBOW repository root.
         cfg_path: Path to MEBOW YAML config. Defaults to the COCO config inside mebow_root.
-        model_path: Path to model weights. If None, uses cfg.TEST.MODEL_FILE from config.
+        model_path: Path to model weights. Defaults to ``./models/body_orientation/model_hboe.pth``.
         device: Torch device string. Defaults to 'cuda' if available, else 'cpu'.
 
     Returns:
@@ -74,10 +74,9 @@ def load_mebow_model(
     )
     update_config(cfg, args)
 
-    if model_path is not None:
-        cfg.defrost()
-        cfg.TEST.MODEL_FILE = model_path
-        cfg.freeze()
+    cfg.defrost()
+    cfg.TEST.MODEL_FILE = model_path
+    cfg.freeze()
 
     model_module = importlib.import_module("models." + cfg.MODEL.NAME)
     model = model_module.get_pose_net(cfg, is_train=False)
