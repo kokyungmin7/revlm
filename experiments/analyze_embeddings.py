@@ -13,6 +13,7 @@ Outputs (saved to --output_dir):
     04_angle_vs_similarity.png        - Angle difference vs similarity (same-person pairs)
     05_camera_similarity.png          - Same-camera vs diff-camera similarity
     06_tsne_embeddings.png            - t-SNE scatter plot
+    07_case_examples.png              - Image pairs: hard negatives, easy/ambiguous/hard positives, large angle diff
     summary_stats.json                - Numeric summary of all analyses
 """
 
@@ -148,12 +149,14 @@ def plot_case_examples(
     output_path: Path,
     n: int = 5,
 ) -> None:
-    """Show image pairs for 3 interesting cases.
+    """Show image pairs for 5 interesting cases.
 
     Cases:
-        1. Hard negatives  — different person, highest cosine similarity
-        2. Easy positives  — same person, highest cosine similarity
+        1. Hard negatives   — different person, highest cosine similarity
+        2. Easy positives   — same person, highest cosine similarity
         3. Large angle diff — same person, largest angle difference
+        4. Ambiguous        — same person, similarity near median (borderline)
+        5. Hard positives   — same person, lowest cosine similarity
     """
     from collections import defaultdict
 
@@ -180,13 +183,23 @@ def plot_case_examples(
     hard_neg_pairs.sort(reverse=True)
     hard_neg_top = hard_neg_pairs[:n]
 
-    # ── Case 2: easy positives (same person, high sim) ────────────────────────
-    easy_pos_pairs: list[tuple[float, int, int]] = []
+    # ── Cases 2, 4, 5: all intra-person pairs sorted by similarity ────────────
+    all_pos_pairs: list[tuple[float, int, int]] = []
     for idxs in person_idx.values():
         for i, j in itertools.combinations(idxs, 2):
-            easy_pos_pairs.append((float(np.dot(embs[i], embs[j])), i, j))
-    easy_pos_pairs.sort(reverse=True)
-    easy_pos_top = easy_pos_pairs[:n]
+            all_pos_pairs.append((float(np.dot(embs[i], embs[j])), i, j))
+    all_pos_pairs.sort(reverse=True)
+
+    # Case 2: easy positives (highest sim)
+    easy_pos_top = all_pos_pairs[:n]
+
+    # Case 5: hard positives (lowest sim)
+    hard_pos_top = list(reversed(all_pos_pairs[-n:]))
+
+    # Case 4: ambiguous (median ± window)
+    mid = len(all_pos_pairs) // 2
+    half_n = n // 2
+    ambiguous_top = all_pos_pairs[max(0, mid - half_n): mid - half_n + n]
 
     # ── Case 3: large angle diff (same person) ────────────────────────────────
     large_angle_pairs: list[tuple[int, float, int, int]] = []
@@ -201,6 +214,8 @@ def plot_case_examples(
     case_specs = [
         ("Hard Negatives (diff person, high sim)", hard_neg_top, "sim"),
         ("Easy Positives (same person, high sim)", easy_pos_top, "sim"),
+        ("Ambiguous (same person, mid sim)", ambiguous_top, "sim"),
+        ("Hard Positives (same person, low sim)", hard_pos_top, "sim"),
         ("Large Angle Diff (same person)", large_angle_top, "angle"),
     ]
 
