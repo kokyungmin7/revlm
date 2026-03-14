@@ -1,15 +1,20 @@
-"""Person Re-Identification using DINOv2 + ArcFace.
+"""Person Re-Identification model backends.
 
-Model: DavronSherbaev/person-reid-arcface
-  - Backbone: DINOv2 ViT-B/14, outputs 768-dim CLS token
-  - Head: ArcFace additive angular margin classifier (15 office classes)
-  - Inference output: L2-normalized 768-dim embedding vector
+Supported models (--reid_model):
+    arcface-dinov2   DavronSherbaev/person-reid-arcface  (DINOv2 ViT-B/14, 768-dim)
+    siglip2          MarketaJu/siglip2-person-description-reid
 
 Usage:
+    model = load_reid_model("arcface-dinov2")   # or "siglip2"
+    emb = model.extract_embedding(bgr_crop)     # np.ndarray (embed_dim,)
+    sim = compute_similarity(emb_a, emb_b)
+
+    # Backward-compatible call style:
     model, device = load_reid_model()
     emb = extract_embedding(model, bgr_crop, device)
-    sim = compute_similarity(emb_a, emb_b)  # cosine similarity in [-1, 1]
 """
+
+from __future__ import annotations
 
 import cv2
 import numpy as np
@@ -19,14 +24,35 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from huggingface_hub import hf_hub_download
 from PIL import Image
+from typing import Protocol, runtime_checkable
 
-_REPO_ID = "DavronSherbaev/person-reid-arcface"
-_FILENAME = "arcface_dinov2.pth"
-_EMBED_DIM = 768
-_NUM_CLASSES = 15
-_MARGIN = 0.5
 
-_TRANSFORM = T.Compose(
+# ── Protocol ──────────────────────────────────────────────────────────────────
+
+@runtime_checkable
+class ReIDBackend(Protocol):
+    """Common interface for all ReID backends."""
+
+    embed_dim: int
+
+    def extract_embedding(self, bgr: np.ndarray) -> np.ndarray:
+        """Extract L2-normalized embedding from a BGR person crop.
+
+        Args:
+            bgr: BGR uint8 ndarray of shape (H, W, 3).
+
+        Returns:
+            L2-normalized float32 embedding of shape (embed_dim,).
+        """
+        ...
+
+
+# ── ArcFace + DINOv2 backend ──────────────────────────────────────────────────
+
+_ARCFACE_REPO_ID = "DavronSherbaev/person-reid-arcface"
+_ARCFACE_FILENAME = "arcface_dinov2.pth"
+
+_ARCFACE_TRANSFORM = T.Compose(
     [
         T.Resize((224, 224)),
         T.ToTensor(),
@@ -35,25 +61,10 @@ _TRANSFORM = T.Compose(
 )
 
 
-class ArcMarginProduct(nn.Module):
-    """ArcFace additive angular margin product layer.
+class _ArcMarginProduct(nn.Module):
+    """ArcFace additive angular margin layer (kept to match checkpoint keys)."""
 
-    Used only during training; kept here to match the saved checkpoint structure.
-
-    Args:
-        in_features: Embedding dimension (768).
-        out_features: Number of classes (15).
-        s: Feature scale factor.
-        m: Angular margin in radians.
-    """
-
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        s: float = 30.0,
-        m: float = 0.5,
-    ) -> None:
+    def __init__(self, in_features: int, out_features: int, s: float = 30.0, m: float = 0.5) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.FloatTensor(out_features, in_features))
         nn.init.xavier_uniform_(self.weight)
@@ -65,71 +76,29 @@ class ArcMarginProduct(nn.Module):
         return cosine * self.s
 
 
-class ArcFaceReID(nn.Module):
-    """DINOv2 ViT-B/14 backbone with ArcFace classification head.
+class _ArcFaceReIDModule(nn.Module):
+    """DINOv2 ViT-B/14 + ArcFace head (internal nn.Module for ArcFaceDinoV2)."""
 
-    For inference, use get_embedding() to extract L2-normalized 768-dim vectors.
-
-    Args:
-        num_classes: Number of person classes in the training set.
-        embed_dim: Embedding dimension of the backbone output.
-        margin: ArcFace angular margin.
-    """
-
-    def __init__(
-        self,
-        num_classes: int = _NUM_CLASSES,
-        embed_dim: int = _EMBED_DIM,
-        margin: float = _MARGIN,
-    ) -> None:
+    def __init__(self, num_classes: int = 15, embed_dim: int = 768, margin: float = 0.5) -> None:
         super().__init__()
         self.backbone = torch.hub.load(
-            "facebookresearch/dinov2",
-            "dinov2_vitb14",
-            pretrained=False,
+            "facebookresearch/dinov2", "dinov2_vitb14", pretrained=False
         )
-        self.arc_head = ArcMarginProduct(embed_dim, num_classes, m=margin)
+        self.arc_head = _ArcMarginProduct(embed_dim, num_classes, m=margin)
 
     def get_embedding(self, x: torch.Tensor) -> torch.Tensor:
-        """Extract L2-normalized embedding from an image batch.
-
-        Args:
-            x: Image tensor of shape (B, 3, 224, 224).
-
-        Returns:
-            L2-normalized embedding tensor of shape (B, 768).
-        """
-        features = self.backbone(x)  # (B, 768) CLS token
-        return F.normalize(features, dim=-1)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        labels: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        emb = self.get_embedding(x)
-        if labels is not None:
-            return self.arc_head(emb, labels)
-        return emb
+        return F.normalize(self.backbone(x), dim=-1)
 
 
-def _load_state_dict(model: ArcFaceReID, state_dict: dict) -> None:
-    """Load state dict with fallback strategies for key mismatches.
-
-    Tries in order:
-    1. Strict load (exact key match)
-    2. Non-strict load (ignore unexpected/missing keys)
-    3. Backbone-only load (filter keys starting with 'backbone.')
-    """
+def _load_arcface_state_dict(model: _ArcFaceReIDModule, state_dict: dict) -> None:
     try:
         model.load_state_dict(state_dict)
         return
     except RuntimeError:
         pass
 
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    missing, _ = model.load_state_dict(state_dict, strict=False)
 
-    # If backbone weights are missing, try extracting backbone-prefixed keys
     backbone_missing = [k for k in missing if k.startswith("backbone.")]
     if backbone_missing:
         backbone_sd = {
@@ -141,67 +110,139 @@ def _load_state_dict(model: ArcFaceReID, state_dict: dict) -> None:
             model.backbone.load_state_dict(backbone_sd, strict=False)
 
 
-def load_reid_model(device: str | None = None) -> tuple["ArcFaceReID", str]:
-    """Load the ArcFace person ReID model from HuggingFace Hub.
+class ArcFaceDinoV2:
+    """ReID backend: DavronSherbaev/person-reid-arcface (DINOv2 ViT-B/14 + ArcFace).
 
-    Downloads and caches the checkpoint on first call.
+    Output: L2-normalized 768-dim embedding.
+    """
+
+    embed_dim: int = 768
+
+    def __init__(self, device: str) -> None:
+        self._device = device
+        model_path = hf_hub_download(repo_id=_ARCFACE_REPO_ID, filename=_ARCFACE_FILENAME)
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+
+        self._model = _ArcFaceReIDModule()
+        _load_arcface_state_dict(self._model, state_dict)
+        self._model.to(device).eval()
+
+    def extract_embedding(self, bgr: np.ndarray) -> np.ndarray:
+        img_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        x = _ARCFACE_TRANSFORM(Image.fromarray(img_rgb)).unsqueeze(0).to(self._device)
+        with torch.no_grad():
+            emb = self._model.get_embedding(x)
+        return emb.cpu().numpy().squeeze()  # (768,)
+
+
+# ── SigLIP2 backend ───────────────────────────────────────────────────────────
+
+class SigLIP2ReID:
+    """ReID backend: MarketaJu/siglip2-person-description-reid (SigLIP2 vision encoder).
+
+    Uses only the vision encoder (image-to-image retrieval).
+    embed_dim is auto-detected from model config.
+    """
+
+    MODEL_ID = "MarketaJu/siglip2-person-description-reid"
+    _FALLBACK_PROCESSOR = "google/siglip-base-patch16-224"
+
+    def __init__(self, device: str) -> None:
+        from transformers import AutoImageProcessor, AutoModel
+
+        self._device = device
+        self._model = AutoModel.from_pretrained(
+            self.MODEL_ID, trust_remote_code=True
+        ).to(device).eval()
+        self.embed_dim: int = self._model.config.vision_config.hidden_size
+
+        # Processor: try model-attached first, then fallback to base SigLIP processor
+        if hasattr(self._model, "processor") and self._model.processor is not None:
+            self._processor = self._model.processor
+        elif hasattr(self._model, "image_processor") and self._model.image_processor is not None:
+            self._processor = self._model.image_processor
+        else:
+            self._processor = AutoImageProcessor.from_pretrained(self._FALLBACK_PROCESSOR)
+
+    def extract_embedding(self, bgr: np.ndarray) -> np.ndarray:
+        img_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        inputs = self._processor(images=img_rgb, return_tensors="pt")
+        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            image_embeds = self._model.get_image_features(**inputs)
+            # get_image_features may return a tensor or an object with named attributes
+            if hasattr(image_embeds, "pooler_output") and image_embeds.pooler_output is not None:
+                image_embeds = image_embeds.pooler_output
+            elif hasattr(image_embeds, "last_hidden_state"):
+                image_embeds = image_embeds.last_hidden_state
+            elif hasattr(image_embeds, "image_embeds"):
+                image_embeds = image_embeds.image_embeds
+
+        embedding = image_embeds.cpu().numpy()[0]
+        norm = np.linalg.norm(embedding)
+        if norm > 1e-8:
+            embedding = embedding / norm
+        return embedding.astype(np.float32)
+
+
+# ── Registry & factory ────────────────────────────────────────────────────────
+
+_REGISTRY: dict[str, type] = {
+    "arcface-dinov2": ArcFaceDinoV2,
+    "siglip2": SigLIP2ReID,
+}
+
+
+def load_reid_model(
+    name: str = "arcface-dinov2",
+    device: str | None = None,
+) -> ReIDBackend:
+    """Load a ReID backend by name.
 
     Args:
-        device: Torch device string. Defaults to 'cuda' if available, else 'cpu'.
+        name: Model key. One of: arcface-dinov2, siglip2.
+        device: Torch device. Auto-detected if None.
 
     Returns:
-        Tuple of (model, device_string).
+        ReIDBackend instance with .embed_dim and .extract_embedding().
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    if name not in _REGISTRY:
+        raise ValueError(f"Unknown ReID model '{name}'. Available: {sorted(_REGISTRY)}")
+    return _REGISTRY[name](device)
 
-    model_path = hf_hub_download(repo_id=_REPO_ID, filename=_FILENAME)
-    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
 
-    model = ArcFaceReID()
-    _load_state_dict(model, state_dict)
-    model.to(device)
-    model.eval()
-
-    return model, device
-
+# ── Backward-compatible helpers ───────────────────────────────────────────────
 
 def extract_embedding(
-    model: "ArcFaceReID",
+    model: ReIDBackend,
     image: np.ndarray,
     device: str,
 ) -> np.ndarray:
-    """Extract ReID embedding from a BGR person crop.
+    """Backward-compatible wrapper around model.extract_embedding().
 
     Args:
-        model: Loaded ArcFaceReID model (from load_reid_model).
-        image: BGR person crop (H x W x 3 uint8 ndarray).
-        device: Torch device string.
+        model: Any ReIDBackend (from load_reid_model).
+        image: BGR uint8 ndarray.
+        device: Ignored (kept for API compatibility).
 
     Returns:
-        L2-normalized embedding vector of shape (768,).
+        L2-normalized embedding array of shape (embed_dim,).
     """
-    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(img_rgb)
-    x = _TRANSFORM(pil_img).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        embedding = model.get_embedding(x)
-
-    return embedding.cpu().numpy().squeeze()  # (768,)
+    return model.extract_embedding(image)
 
 
 def compute_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
     """Cosine similarity between two L2-normalized ReID embeddings.
 
-    Since embeddings are L2-normalized, this is equivalent to the dot product.
-
     Args:
-        emb1: First embedding of shape (768,).
-        emb2: Second embedding of shape (768,).
+        emb1: First embedding.
+        emb2: Second embedding (must have same shape as emb1).
 
     Returns:
-        Similarity score in [-1.0, 1.0]. Higher means more similar.
+        Similarity score in [-1.0, 1.0].
     """
     return float(np.dot(emb1, emb2))

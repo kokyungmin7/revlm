@@ -21,6 +21,7 @@ experiments/*
 !experiments/*.py
 WB_WoB-ReID_sample/
 data/
+reference/
 
 # Created by https://www.toptal.com/developers/gitignore/api/python,images,video,venv
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,images,video,venv

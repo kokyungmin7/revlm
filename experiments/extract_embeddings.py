@@ -31,6 +31,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 from tqdm import tqdm
 
 # Ensure project root is importable (same convention as tests/smoke/)
@@ -164,6 +165,12 @@ def main() -> None:
         default=None,
         help="Torch device (cuda / cpu). Auto-detected if not set.",
     )
+    parser.add_argument(
+        "--reid_model",
+        default="arcface-dinov2",
+        choices=["arcface-dinov2", "siglip2"],
+        help="ReID backend to use (default: arcface-dinov2).",
+    )
     args = parser.parse_args()
 
     dataset_root: Path = args.dataset_root.resolve()
@@ -181,8 +188,9 @@ def main() -> None:
 
     # ── load models ───────────────────────────────────────────────────────────
     print("[2/3] Loading models ...")
-    reid_model, device = load_reid_model(device=args.device)
-    print(f"      ReID model loaded on {device}")
+    device: str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    reid_model = load_reid_model(name=args.reid_model, device=device)
+    print(f"      ReID model '{args.reid_model}' loaded (embed_dim={reid_model.embed_dim})")
 
     mebow_cfg = str(args.mebow_cfg) if args.mebow_cfg else None
     mebow_kwargs: dict = dict(
@@ -223,10 +231,10 @@ def main() -> None:
             "dataset_root": str(dataset_root),
             "sets": args.sets,
             "models": {
-                "reid": "DavronSherbaev/person-reid-arcface",
+                "reid": args.reid_model,
                 "orientation": "MEBOW-HRNet-W32",
             },
-            "embedding_dim": 768,
+            "embedding_dim": reid_model.embed_dim,
             "total_images": len(results),
             "failed_images": failed,
             "extracted_at": datetime.now(timezone.utc).isoformat(),
