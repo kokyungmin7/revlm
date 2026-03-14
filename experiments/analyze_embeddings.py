@@ -61,14 +61,16 @@ def _angle_bin_label(angle: int) -> str:
 def _load_data(
     embeddings_path: Path,
     target_set: str | None,
-) -> tuple[list[dict], np.ndarray]:
+) -> tuple[list[dict], np.ndarray, str | None]:
     """Load JSON and optionally filter to a single set.
 
     Returns:
-        (records, embeddings_matrix) where embeddings_matrix is (N, 768).
+        (records, embeddings_matrix, dataset_root) where embeddings_matrix is (N, 768).
     """
     with open(embeddings_path) as f:
         data = json.load(f)
+
+    dataset_root: str | None = data.get("metadata", {}).get("dataset_root")
 
     images = data["images"]
     if target_set:
@@ -81,7 +83,7 @@ def _load_data(
         )
 
     embs = np.array([r["embedding"] for r in images], dtype=np.float32)
-    return images, embs
+    return images, embs, dataset_root
 
 
 def _build_pair_sims(
@@ -119,6 +121,149 @@ def _build_pair_sims(
         attempts += 1
 
     return intra_sims, inter_sims
+
+
+# ── image loader helper ───────────────────────────────────────────────────────
+
+def _load_image(abs_path: Path, size: tuple[int, int] = (96, 192)) -> np.ndarray:
+    """Load image as RGB numpy array, resized to (width, height).
+
+    Returns a gray placeholder if the file is missing or unreadable.
+    """
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(abs_path).convert("RGB").resize(size, PILImage.BILINEAR)
+        return np.array(img)
+    except Exception:
+        placeholder = np.full((size[1], size[0], 3), 180, dtype=np.uint8)
+        return placeholder
+
+
+# ── plot 07: case example image grid ─────────────────────────────────────────
+
+def plot_case_examples(
+    records: list[dict],
+    embs: np.ndarray,
+    dataset_root: Path,
+    output_path: Path,
+    n: int = 5,
+) -> None:
+    """Show image pairs for 3 interesting cases.
+
+    Cases:
+        1. Hard negatives  — different person, highest cosine similarity
+        2. Easy positives  — same person, highest cosine similarity
+        3. Large angle diff — same person, largest angle difference
+    """
+    from collections import defaultdict
+
+    person_idx: dict[int, list[int]] = defaultdict(list)
+    for i, rec in enumerate(records):
+        person_idx[rec["person_id"]].append(i)
+
+    # ── Case 1: hard negatives (different person, high sim) ───────────────────
+    # Sample a subset of persons to keep memory manageable
+    rng = random.Random(42)
+    all_pids = list(person_idx.keys())
+    sample_pids = rng.sample(all_pids, min(2000, len(all_pids)))
+    sample_idx = [person_idx[pid][0] for pid in sample_pids]  # one image per person
+    sample_embs = embs[sample_idx]
+
+    sim_mat = sample_embs @ sample_embs.T  # (M, M)
+    hard_neg_pairs: list[tuple[float, int, int]] = []
+    for row in range(len(sample_idx)):
+        for col in range(row + 1, len(sample_idx)):
+            pid_a = records[sample_idx[row]]["person_id"]
+            pid_b = records[sample_idx[col]]["person_id"]
+            if pid_a != pid_b:
+                hard_neg_pairs.append((float(sim_mat[row, col]), sample_idx[row], sample_idx[col]))
+    hard_neg_pairs.sort(reverse=True)
+    hard_neg_top = hard_neg_pairs[:n]
+
+    # ── Case 2: easy positives (same person, high sim) ────────────────────────
+    easy_pos_pairs: list[tuple[float, int, int]] = []
+    for idxs in person_idx.values():
+        for i, j in itertools.combinations(idxs, 2):
+            easy_pos_pairs.append((float(np.dot(embs[i], embs[j])), i, j))
+    easy_pos_pairs.sort(reverse=True)
+    easy_pos_top = easy_pos_pairs[:n]
+
+    # ── Case 3: large angle diff (same person) ────────────────────────────────
+    large_angle_pairs: list[tuple[int, float, int, int]] = []
+    for idxs in person_idx.values():
+        for i, j in itertools.combinations(idxs, 2):
+            d = _angle_diff(records[i]["orientation_angle"], records[j]["orientation_angle"])
+            large_angle_pairs.append((d, float(np.dot(embs[i], embs[j])), i, j))
+    large_angle_pairs.sort(reverse=True)
+    large_angle_top = large_angle_pairs[:n]
+
+    # ── Build figure ──────────────────────────────────────────────────────────
+    case_specs = [
+        ("Hard Negatives (diff person, high sim)", hard_neg_top, "sim"),
+        ("Easy Positives (same person, high sim)", easy_pos_top, "sim"),
+        ("Large Angle Diff (same person)", large_angle_top, "angle"),
+    ]
+
+    img_w, img_h = 96, 192
+    n_cols = n * 2          # left + right image for each pair
+    n_rows = len(case_specs)
+    fig_w = max(16, n_cols * 1.2)
+    fig_h = n_rows * 3.0
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h))
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    for row_idx, (title, pairs, metric) in enumerate(case_specs):
+        # Section title on the leftmost axis
+        axes[row_idx, 0].set_ylabel(title, fontsize=9, fontweight="bold", rotation=90, labelpad=6)
+        for col_pair, pair in enumerate(pairs):
+            if metric == "sim":
+                sim_val, i, j = pair
+                angle_d = _angle_diff(records[i]["orientation_angle"], records[j]["orientation_angle"])
+                caption_left = (f"pid={records[i]['person_id']}\n"
+                                f"cam={records[i]['camera_id']}  {records[i]['orientation_angle']}°")
+                caption_right = (f"pid={records[j]['person_id']}\n"
+                                 f"cam={records[j]['camera_id']}  {records[j]['orientation_angle']}°\n"
+                                 f"sim={sim_val:.3f}  Δangle={angle_d}°")
+            else:  # angle metric
+                angle_d, sim_val, i, j = pair
+                caption_left = (f"pid={records[i]['person_id']}\n"
+                                f"cam={records[i]['camera_id']}  {records[i]['orientation_angle']}°")
+                caption_right = (f"pid={records[j]['person_id']}\n"
+                                 f"cam={records[j]['camera_id']}  {records[j]['orientation_angle']}°\n"
+                                 f"Δangle={angle_d}°  sim={sim_val:.3f}")
+
+            ax_l = axes[row_idx, col_pair * 2]
+            ax_r = axes[row_idx, col_pair * 2 + 1]
+
+            img_l = _load_image(dataset_root / records[i]["path"], (img_w, img_h))
+            img_r = _load_image(dataset_root / records[j]["path"], (img_w, img_h))
+
+            ax_l.imshow(img_l)
+            ax_l.set_xlabel(caption_left, fontsize=6)
+            ax_l.set_xticks([])
+            ax_l.set_yticks([])
+
+            ax_r.imshow(img_r)
+            ax_r.set_xlabel(caption_right, fontsize=6)
+            ax_r.set_xticks([])
+            ax_r.set_yticks([])
+
+            # Vertical separator between pairs (thin red line on left edge of right image)
+            if col_pair > 0:
+                ax_l.spines["left"].set_linewidth(2)
+                ax_l.spines["left"].set_color("lightgray")
+
+        # Hide unused axes if pairs < n
+        for col_pair in range(len(pairs), n):
+            axes[row_idx, col_pair * 2].set_visible(False)
+            axes[row_idx, col_pair * 2 + 1].set_visible(False)
+
+    fig.suptitle("Case Examples — ReID Embedding Analysis", fontsize=12, fontweight="bold", y=1.01)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=_FIG_DPI, bbox_inches="tight")
+    plt.close(fig)
 
 
 # ── plot 01: intra vs inter distribution ─────────────────────────────────────
@@ -483,6 +628,18 @@ def main() -> None:
         default=42,
         help="Random seed for sampling.",
     )
+    parser.add_argument(
+        "--dataset_root",
+        default=None,
+        type=Path,
+        help="Root directory of the image dataset. Defaults to metadata.dataset_root in the JSON.",
+    )
+    parser.add_argument(
+        "--n_examples",
+        type=int,
+        default=5,
+        help="Number of image pairs to show per case in plot 07 (default: 5).",
+    )
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -493,8 +650,12 @@ def main() -> None:
 
     # ── load data ─────────────────────────────────────────────────────────────
     print(f"Loading embeddings from {args.embeddings} ...")
-    records, embs = _load_data(args.embeddings, args.target_set)
+    records, embs, meta_dataset_root = _load_data(args.embeddings, args.target_set)
     print(f"  {len(records)} images, set filter: {args.target_set or 'all'}")
+
+    dataset_root: Path | None = args.dataset_root or (
+        Path(meta_dataset_root) if meta_dataset_root else None
+    )
 
     n_persons = len({r["person_id"] for r in records})
     print(f"  {n_persons} unique persons")
@@ -535,6 +696,15 @@ def main() -> None:
     # ── plot 06 ───────────────────────────────────────────────────────────────
     print("Plotting 06: t-SNE ...")
     plot_tsne(records, embs, out_dir / "06_tsne_embeddings.png")
+
+    # ── plot 07 ───────────────────────────────────────────────────────────────
+    if dataset_root is not None:
+        print(f"Plotting 07: case examples (n={args.n_examples} per case) ...")
+        plot_case_examples(
+            records, embs, dataset_root, out_dir / "07_case_examples.png", n=args.n_examples
+        )
+    else:
+        print("Skipping plot 07: dataset_root not available (pass --dataset_root or check JSON metadata).")
 
     # ── save summary ─────────────────────────────────────────────────────────
     summary_path = out_dir / "summary_stats.json"
