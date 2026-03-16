@@ -132,7 +132,7 @@ class VLMVerifier:
         pil_b = Image.fromarray(bgr_b[:, :, ::-1])
 
         messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": [{"type": "text", "text": _SYSTEM_PROMPT}]},
             {
                 "role": "user",
                 "content": [
