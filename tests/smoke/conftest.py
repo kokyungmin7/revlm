@@ -61,23 +61,33 @@ def reid_triplet() -> ReidTriplet:
     if root is None:
         pytest.skip("No dataset found")
 
-    query_images = sorted((root / "query").glob("*.jpg"))
+    # split 서브디렉토리 감지: root/query/ 없으면 root/{split}/query/ 탐색
+    split_dir: Path
+    if (root / "query").exists():
+        split_dir = root
+    else:
+        splits = [d for d in sorted(root.iterdir()) if d.is_dir() and (d / "query").exists()]
+        if not splits:
+            pytest.skip("No split directory with query/ found")
+        split_dir = random.choice(splits)
+
+    query_images = sorted((split_dir / "query").glob("*.jpg"))
     if not query_images:
-        pytest.skip("No images in query/")
+        pytest.skip(f"No images in {split_dir}/query/")
 
     query_path = random.choice(query_images)
     qid = _person_id(query_path)
     if qid is None:
         pytest.skip(f"Cannot parse person ID from {query_path.name}")
 
-    pool = list((root / "bounding_box_train").glob("*.jpg")) + \
-           list((root / "bounding_box_test").glob("*.jpg"))
+    pool = list((split_dir / "bounding_box_train").glob("*.jpg")) + \
+           list((split_dir / "bounding_box_test").glob("*.jpg"))
 
     positives = [p for p in pool if _person_id(p) == qid]
     negatives = [p for p in pool if _person_id(p) != qid and _person_id(p) is not None]
 
     if not positives:
-        pytest.skip(f"No positive images for ID {qid}")
+        pytest.skip(f"No positive images for ID {qid} in {split_dir.name}")
     if not negatives:
         pytest.skip("No negative images found")
 
