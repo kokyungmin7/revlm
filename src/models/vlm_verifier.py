@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoModelForVision2Seq, AutoProcessor
+from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
 _SYSTEM_PROMPT = (
     "You are an expert in person re-identification. "
@@ -105,7 +105,7 @@ class VLMVerifier:
         self.model_id = model_id
         self.dtype = dtype
 
-        self.model = AutoModelForVision2Seq.from_pretrained(
+        self.model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_id,
             torch_dtype=dtype,
             device_map=device,

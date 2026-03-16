@@ -8,13 +8,13 @@ pytestmark = pytest.mark.smoke
 
 
 def test_reid_embedding_shape(sample_image_bgr: np.ndarray) -> None:
-    from src.models.reid import extract_embedding, load_reid_model
+    from src.models.reid import load_reid_model
 
-    model, device = load_reid_model()
-    emb = extract_embedding(model, sample_image_bgr, device)
+    model = load_reid_model()
+    emb = model.extract_embedding(sample_image_bgr)
 
-    assert emb.ndim == 1 and emb.shape[0] == 768, (
-        f"Expected embedding shape (768,), got {emb.shape}"
+    assert emb.ndim == 1 and emb.shape[0] == model.embed_dim, (
+        f"Expected embedding shape ({model.embed_dim},), got {emb.shape}"
     )
 
     norm = float(np.linalg.norm(emb))
@@ -24,11 +24,11 @@ def test_reid_embedding_shape(sample_image_bgr: np.ndarray) -> None:
 
 
 def test_reid_same_image_similarity(sample_image_bgr: np.ndarray) -> None:
-    from src.models.reid import compute_similarity, extract_embedding, load_reid_model
+    from src.models.reid import compute_similarity, load_reid_model
 
-    model, device = load_reid_model()
-    emb1 = extract_embedding(model, sample_image_bgr, device)
-    emb2 = extract_embedding(model, sample_image_bgr, device)
+    model = load_reid_model()
+    emb1 = model.extract_embedding(sample_image_bgr)
+    emb2 = model.extract_embedding(sample_image_bgr)
 
     sim = compute_similarity(emb1, emb2)
     print(f"\n[smoke_reid] same-image cosine similarity: {sim:.6f} (expected ~1.0)")
@@ -36,18 +36,18 @@ def test_reid_same_image_similarity(sample_image_bgr: np.ndarray) -> None:
 
 
 def test_reid_crop_similarity_and_save(sample_image_bgr: np.ndarray) -> None:
-    from src.models.reid import compute_similarity, extract_embedding, load_reid_model
+    from src.models.reid import compute_similarity, load_reid_model
 
     Path("experiments").mkdir(exist_ok=True)
-    model, device = load_reid_model()
+    model = load_reid_model()
 
     h, w = sample_image_bgr.shape[:2]
     crop_top = sample_image_bgr[: h // 2, :, :]
     crop_bot = sample_image_bgr[h // 2 :, :, :]
 
-    emb_full = extract_embedding(model, sample_image_bgr, device)
-    emb_top = extract_embedding(model, crop_top, device)
-    emb_bot = extract_embedding(model, crop_bot, device)
+    emb_full = model.extract_embedding(sample_image_bgr)
+    emb_top = model.extract_embedding(crop_top)
+    emb_bot = model.extract_embedding(crop_bot)
 
     sim_top = compute_similarity(emb_full, emb_top)
     sim_bot = compute_similarity(emb_full, emb_bot)
