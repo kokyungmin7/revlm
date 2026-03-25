@@ -52,7 +52,8 @@ def main() -> None:
     parser.add_argument("--hitl-dir", default="data/hitl")
     parser.add_argument("--threshold", type=float, default=0.7)
     parser.add_argument("--n-queries", type=int, default=50)
-    parser.add_argument("--split", default=None)
+    parser.add_argument("--split", default="both_large",
+                        choices=["both_large", "both_small", "with_bag", "without_bag"])
     args = parser.parse_args()
 
     root = Path(args.data_root)
