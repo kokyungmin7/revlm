@@ -2,12 +2,19 @@
 
 Compares two person crops and determines if they are the same individual.
 Designed for GCP L4 (24GB) GPU with bfloat16 precision.
+
+HITL integration: set hitl_threshold to automatically queue low-confidence
+predictions for human review via HITLCollector.
+
+LoRA integration: set lora_adapter_path to load a PEFT adapter on top of
+the base model (e.g., from VLMLoRATrainer output).
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -93,6 +100,11 @@ class VLMVerifier:
         device: Target device string (e.g., "cuda", "cuda:0").
         model_id: HuggingFace model identifier.
         dtype: Model precision dtype.
+        hitl_threshold: If set, predictions with confidence below this value
+            are automatically logged to the HITL review queue.
+        hitl_data_dir: Root directory for HITL data storage.
+        lora_adapter_path: Path to a PEFT LoRA adapter directory. If set,
+            the adapter is loaded on top of the base model.
     """
 
     def __init__(
@@ -100,6 +112,9 @@ class VLMVerifier:
         device: str,
         model_id: str,
         dtype: torch.dtype,
+        hitl_threshold: float | None = None,
+        hitl_data_dir: str = "data/hitl",
+        lora_adapter_path: str | None = None,
     ) -> None:
         self.device = device
         self.model_id = model_id
@@ -111,6 +126,18 @@ class VLMVerifier:
             device_map=device,
         ).eval()
         self.processor = AutoProcessor.from_pretrained(model_id)
+
+        if lora_adapter_path is not None:
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(self.model, lora_adapter_path)
+            self.model.eval()
+
+        self._hitl_threshold = hitl_threshold
+        if hitl_threshold is not None:
+            from src.models.hitl_collector import HITLCollector
+            self._hitl: HITLCollector | None = HITLCollector(hitl_data_dir)
+        else:
+            self._hitl = None
 
     def verify(
         self,
@@ -166,13 +193,21 @@ class VLMVerifier:
             skip_special_tokens=True,
         )[0]
 
-        return _parse_output(raw)
+        result = _parse_output(raw)
+
+        if self._hitl is not None and result.confidence < self._hitl_threshold:  # type: ignore[operator]
+            self._hitl.log(bgr_a, bgr_b, result)
+
+        return result
 
 
 def load_vlm_verifier(
     model_id: str = "Qwen/Qwen3-VL-8B-Instruct",
     device: str | None = None,
     dtype: torch.dtype = torch.bfloat16,
+    hitl_threshold: float | None = None,
+    hitl_data_dir: str = "data/hitl",
+    lora_adapter_path: str | None = None,
 ) -> VLMVerifier:
     """Load a VLMVerifier with the specified configuration.
 
@@ -180,10 +215,20 @@ def load_vlm_verifier(
         model_id: HuggingFace model identifier for the VLM.
         device: Target device. None auto-detects CUDA.
         dtype: Model precision. Defaults to bfloat16.
+        hitl_threshold: Queue predictions below this confidence for human review.
+        hitl_data_dir: Root directory for HITL data storage.
+        lora_adapter_path: Path to PEFT LoRA adapter. None uses base model.
 
     Returns:
         Loaded VLMVerifier ready for inference.
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    return VLMVerifier(device=device, model_id=model_id, dtype=dtype)
+    return VLMVerifier(
+        device=device,
+        model_id=model_id,
+        dtype=dtype,
+        hitl_threshold=hitl_threshold,
+        hitl_data_dir=hitl_data_dir,
+        lora_adapter_path=lora_adapter_path,
+    )
