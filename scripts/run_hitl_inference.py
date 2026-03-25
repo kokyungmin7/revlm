@@ -90,15 +90,22 @@ def main() -> None:
 
     queued = 0
     processed = 0
+    skipped = 0
+    correct = 0   # VLM prediction matches ground truth
+    total_pairs = 0
+
+    SEP = "─" * 72
 
     for query_path in sampled:
         qid = _person_id(query_path)
         if qid is None:
+            skipped += 1
             continue
 
         positives = [p for p in pool if _person_id(p) == qid]
         negatives = [p for p in pool if _person_id(p) != qid and _person_id(p) is not None]
         if not positives or not negatives:
+            skipped += 1
             continue
 
         pos_path = random.choice(positives)
@@ -109,35 +116,80 @@ def main() -> None:
         bgr_n = cv2.imread(str(neg_path))
 
         if bgr_q is None or bgr_p is None or bgr_n is None:
+            skipped += 1
             continue
 
-        # Positive pair
-        res_pos = verifier.verify(bgr_q, bgr_p)
-        if res_pos.confidence < args.threshold:
-            queued += 1
-        print(
-            f"[{processed+1}/{len(sampled)}] +pair id={qid} "
-            f"same={res_pos.is_same} conf={res_pos.confidence:.3f}"
-            + (" → QUEUED" if res_pos.confidence < args.threshold else "")
-        )
-
-        # Negative pair
-        res_neg = verifier.verify(bgr_q, bgr_n)
-        if res_neg.confidence < args.threshold:
-            queued += 1
-        print(
-            f"[{processed+1}/{len(sampled)}] -pair id={qid}  "
-            f"same={res_neg.is_same} conf={res_neg.confidence:.3f}"
-            + (" → QUEUED" if res_neg.confidence < args.threshold else "")
-        )
-
         processed += 1
+        h_q, w_q = bgr_q.shape[:2]
+        h_p, w_p = bgr_p.shape[:2]
+        h_n, w_n = bgr_n.shape[:2]
+
+        print(SEP)
+        print(
+            f"[{processed}/{len(sampled)}] Query  person_id={qid}"
+            f"  file={query_path.name}  size={w_q}x{h_q}"
+        )
+
+        # ── Positive pair ──────────────────────────────────────────────
+        res_pos = verifier.verify(bgr_q, bgr_p)
+        total_pairs += 1
+        is_queued_pos = res_pos.confidence < args.threshold
+        if is_queued_pos:
+            queued += 1
+        gt_correct_pos = res_pos.is_same  # ground truth: same
+        if gt_correct_pos:
+            correct += 1
+
+        print(
+            f"  [+] Positive  person_id={qid}"
+            f"  file={pos_path.name}  size={w_p}x{h_p}"
+        )
+        print(
+            f"      Prediction : {'SAME      ' if res_pos.is_same else 'DIFFERENT '}"
+            f" (GT: SAME)  {'✓ correct' if gt_correct_pos else '✗ wrong'}"
+        )
+        print(f"      Confidence : {res_pos.confidence:.3f}"
+              + (f"  ← QUEUED (< {args.threshold})" if is_queued_pos else ""))
+        print(f"      Reasoning  : {res_pos.reasoning}")
+
+        # ── Negative pair ──────────────────────────────────────────────
+        nid = _person_id(neg_path)
+        res_neg = verifier.verify(bgr_q, bgr_n)
+        total_pairs += 1
+        is_queued_neg = res_neg.confidence < args.threshold
+        if is_queued_neg:
+            queued += 1
+        gt_correct_neg = not res_neg.is_same  # ground truth: different
+        if gt_correct_neg:
+            correct += 1
+
+        print(
+            f"  [-] Negative  person_id={nid}"
+            f"  file={neg_path.name}  size={w_n}x{h_n}"
+        )
+        print(
+            f"      Prediction : {'SAME      ' if res_neg.is_same else 'DIFFERENT '}"
+            f" (GT: DIFFERENT)  {'✓ correct' if gt_correct_neg else '✗ wrong'}"
+        )
+        print(f"      Confidence : {res_neg.confidence:.3f}"
+              + (f"  ← QUEUED (< {args.threshold})" if is_queued_neg else ""))
+        print(f"      Reasoning  : {res_neg.reasoning}")
 
     from src.models.hitl_collector import HITLCollector
     collector = HITLCollector(args.hitl_dir)
-    print(f"\nDone. Processed {processed} queries ({processed * 2} pairs).")
-    print(f"Queued for review : {collector.queue_size}")
-    print(f"\nNext step: uv run python scripts/hitl_review.py --data-dir {args.hitl_dir}")
+
+    accuracy = correct / total_pairs if total_pairs > 0 else 0.0
+
+    print(SEP)
+    print("\n=== Run Summary ===")
+    print(f"  Queries processed : {processed}  (skipped: {skipped})")
+    print(f"  Pairs evaluated   : {total_pairs}  (positive: {processed}, negative: {processed})")
+    print(f"  VLM accuracy      : {correct}/{total_pairs} = {accuracy:.1%}")
+    print(f"  Queued for review : {queued}  (confidence < {args.threshold})")
+    print(f"  Total in queue    : {collector.queue_size}")
+    print(f"  Total labeled     : {collector.labeled_size}")
+    if collector.queue_size > 0:
+        print(f"\nNext step: uv run python scripts/hitl_review.py --data-dir {args.hitl_dir}")
 
 
 if __name__ == "__main__":
