@@ -17,49 +17,53 @@ from typing import Any
 
 import torch
 
-_SYSTEM_PROMPT = (
-    "You are an expert in person re-identification. "
-    "You carefully analyze visual appearance features such as clothing color, "
-    "clothing style, accessories, body shape, and other distinguishing characteristics "
-    "to determine if two person images show the same individual."
-)
-
-_USER_PROMPT = (
-    "The two images below are person crops from surveillance cameras.\n"
-    "Analyze their appearance carefully.\n"
-    "Answer in exactly this format:\n"
-    "SAME_PERSON: <YES or NO>\n"
-    "CONFIDENCE: <0.0 to 1.0>\n"
-    "REASONING: <one sentence>"
-)
+from src.models.vlm_verifier import SYSTEM_PROMPT as _SYSTEM_PROMPT, USER_PROMPT as _USER_PROMPT
 
 
-def _label_to_assistant_text(label: bool) -> str:
-    """Convert boolean label to expected model output format.
+def _label_to_assistant_text(
+    label: bool,
+    confidence: float | None = None,
+    reasoning: str | None = None,
+) -> str:
+    """Convert labeled sample to expected model output format.
+
+    Uses the original VLM's confidence and reasoning when available,
+    so the model learns calibrated confidence rather than always-high values.
 
     Args:
         label: True for same person, False for different.
+        confidence: Original VLM confidence. Falls back to 0.95 if None.
+        reasoning: Original VLM reasoning. Falls back to a template if None.
 
     Returns:
         Structured assistant response string.
     """
     verdict = "YES" if label else "NO"
-    confidence = "0.95" if label else "0.95"
-    reasoning = (
-        "The two crops show the same person based on consistent clothing and appearance."
-        if label
-        else "The two crops show different individuals based on distinct clothing and features."
-    )
-    return f"SAME_PERSON: {verdict}\nCONFIDENCE: {confidence}\nREASONING: {reasoning}"
+    conf_str = f"{confidence:.2f}" if confidence is not None else "0.95"
+    if reasoning is None:
+        reasoning = (
+            "The two crops show the same person based on consistent clothing and appearance."
+            if label
+            else "The two crops show different individuals based on distinct clothing and features."
+        )
+    return f"SAME_PERSON: {verdict}\nCONFIDENCE: {conf_str}\nREASONING: {reasoning}"
 
 
-def _build_conversation(img_path_a: str, img_path_b: str, label: bool) -> dict[str, Any]:
+def _build_conversation(
+    img_path_a: str,
+    img_path_b: str,
+    label: bool,
+    confidence: float | None = None,
+    reasoning: str | None = None,
+) -> dict[str, Any]:
     """Build a Qwen3-VL conversation dict for SFT training.
 
     Args:
         img_path_a: Absolute path to first image.
         img_path_b: Absolute path to second image.
         label: Ground truth label.
+        confidence: Original VLM confidence (passed to assistant text).
+        reasoning: Original VLM reasoning (passed to assistant text).
 
     Returns:
         Conversation dict with 'messages' key.
@@ -80,7 +84,7 @@ def _build_conversation(img_path_a: str, img_path_b: str, label: bool) -> dict[s
             },
             {
                 "role": "assistant",
-                "content": [{"type": "text", "text": _label_to_assistant_text(label)}],
+                "content": [{"type": "text", "text": _label_to_assistant_text(label, confidence, reasoning)}],
             },
         ]
     }
@@ -186,9 +190,15 @@ class VLMLoRATrainer:
         from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
         from trl import SFTConfig, SFTTrainer
 
-        # Build conversation dataset
+        # Build conversation dataset — use original VLM confidence/reasoning when available
         conversations = [
-            _build_conversation(s["img_path_a"], s["img_path_b"], s["label"])
+            _build_conversation(
+                s["img_path_a"],
+                s["img_path_b"],
+                s["label"],
+                confidence=s.get("confidence"),
+                reasoning=s.get("reasoning"),
+            )
             for s in samples
         ]
         dataset = Dataset.from_list(conversations)

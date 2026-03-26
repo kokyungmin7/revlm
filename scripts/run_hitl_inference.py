@@ -54,6 +54,8 @@ def main() -> None:
     parser.add_argument("--n-queries", type=int, default=50)
     parser.add_argument("--split", default="both_large",
                         choices=["both_large", "both_small", "with_bag", "without_bag"])
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducible query sampling (default: 42)")
     args = parser.parse_args()
 
     root = Path(args.data_root)
@@ -72,7 +74,8 @@ def main() -> None:
     # HITL inference uses train gallery only — keeps test set unseen until evaluation.
     pool = list((split_dir / "bounding_box_train").glob("*.jpg"))
 
-    # Sample up to n_queries
+    # Sample up to n_queries (seeded for reproducibility)
+    random.seed(args.seed)
     sampled = random.sample(query_images, min(args.n_queries, len(query_images)))
 
     print(f"Queries to process : {len(sampled)}")

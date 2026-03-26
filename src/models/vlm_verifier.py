@@ -14,21 +14,20 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
-_SYSTEM_PROMPT = (
+SYSTEM_PROMPT = (
     "You are an expert in person re-identification. "
     "You carefully analyze visual appearance features such as clothing color, "
     "clothing style, accessories, body shape, and other distinguishing characteristics "
     "to determine if two person images show the same individual."
 )
 
-_USER_PROMPT = (
+USER_PROMPT = (
     "The two images below are person crops from surveillance cameras.\n"
     "Analyze their appearance carefully.\n"
     "Answer in exactly this format:\n"
@@ -129,12 +128,14 @@ class VLMVerifier:
 
         if lora_adapter_path is not None:
             from peft import PeftModel
+
             self.model = PeftModel.from_pretrained(self.model, lora_adapter_path)
             self.model.eval()
 
         self._hitl_threshold = hitl_threshold
         if hitl_threshold is not None:
             from src.models.hitl_collector import HITLCollector
+
             self._hitl: HITLCollector | None = HITLCollector(hitl_data_dir)
         else:
             self._hitl = None
@@ -159,13 +160,13 @@ class VLMVerifier:
         pil_b = Image.fromarray(bgr_b[:, :, ::-1])
 
         messages = [
-            {"role": "system", "content": [{"type": "text", "text": _SYSTEM_PROMPT}]},
+            {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": pil_a},
                     {"type": "image", "image": pil_b},
-                    {"type": "text", "text": _USER_PROMPT},
+                    {"type": "text", "text": USER_PROMPT},
                 ],
             },
         ]

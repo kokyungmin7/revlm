@@ -116,13 +116,18 @@ def _print_summary_table(stages: list[dict]) -> None:
 
 # ── Stage runners ─────────────────────────────────────────────────────────────
 
-def run_stage1_reid(pairs, reid_model_name: str) -> tuple[dict, list[bool]]:
-    """Stage 1: ReID cosine similarity with auto-optimized threshold."""
+def run_stage1_reid(pairs, reid_model_name: str, threshold: float = 0.5) -> tuple[dict, list[bool]]:
+    """Stage 1: ReID cosine similarity with a fixed threshold.
+
+    Uses a pre-defined threshold instead of grid-searching on the test set,
+    which would leak test information and inflate Stage 1 accuracy.
+    """
     from src.models.reid import load_reid_model, compute_similarity
-    from src.evaluation.metrics import find_best_threshold
+    from src.evaluation.metrics import compute_metrics
 
     _print_stage_header(1, f"ReID baseline ({reid_model_name})")
     print(f"  Loading model: {reid_model_name} ...")
+    print(f"  Threshold    : {threshold} (fixed)")
     model = load_reid_model(reid_model_name)
 
     similarities: list[float] = []
@@ -142,8 +147,8 @@ def run_stage1_reid(pairs, reid_model_name: str) -> tuple[dict, list[bool]]:
         similarities.append(sim)
         labels.append(pair.label)
 
-    threshold, metrics = find_best_threshold(similarities, labels)
     predictions = [s >= threshold for s in similarities]
+    metrics = compute_metrics(predictions, labels)
 
     elapsed = time.time() - t0
     print(f"  Processed {len(pairs)} pairs in {elapsed:.1f}s")
@@ -175,7 +180,8 @@ def run_stage2_vlm(pairs, hitl_threshold: float) -> tuple[dict, list[bool]]:
 
     _print_stage_header(2, "VLM verifier (base)")
     print("  Loading Qwen3-VL-8B-Instruct ...")
-    verifier = load_vlm_verifier(hitl_threshold=hitl_threshold)
+    # hitl_threshold=None: evaluation must NOT write to HITL queue (test data contamination)
+    verifier = load_vlm_verifier(hitl_threshold=None)
 
     predictions: list[bool] = []
     labels: list[bool] = []
@@ -231,8 +237,9 @@ def run_stage3_vlm_lora(pairs, lora_adapter_path: str, hitl_threshold: float) ->
 
     _print_stage_header(3, f"VLM + LoRA adapter ({Path(lora_adapter_path).name})")
     print(f"  Loading Qwen3-VL-8B-Instruct + LoRA from: {lora_adapter_path}")
+    # hitl_threshold=None: evaluation must NOT write to HITL queue (test data contamination)
     verifier = load_vlm_verifier(
-        hitl_threshold=hitl_threshold,
+        hitl_threshold=None,
         lora_adapter_path=lora_adapter_path,
     )
 
@@ -289,6 +296,8 @@ def main() -> None:
                         help="Dataset split to evaluate (default: both_large)")
     parser.add_argument("--reid-model", default="arcface-dinov2",
                         choices=["arcface-dinov2", "siglip2"])
+    parser.add_argument("--reid-threshold", type=float, default=0.5,
+                        help="Fixed cosine similarity threshold for Stage 1 (default: 0.5)")
     parser.add_argument("--hitl-threshold", type=float, default=0.7)
     parser.add_argument("--lora-adapter", default="models/vlm_verifier_lora/latest")
     parser.add_argument("--skip-stage", default="",
@@ -326,7 +335,7 @@ def main() -> None:
     stage_results: list[dict] = []
 
     if 1 not in skip:
-        result1, _ = run_stage1_reid(pairs, args.reid_model)
+        result1, _ = run_stage1_reid(pairs, args.reid_model, threshold=args.reid_threshold)
         stage_results.append(result1)
 
     if 2 not in skip:
