@@ -318,7 +318,8 @@ def main() -> None:
 
     n_pos = sum(1 for p in pairs if p.label)
     n_neg = sum(1 for p in pairs if not p.label)
-    print(f"\nEval set: {len(pairs)} pairs  (positive={n_pos}, negative={n_neg})")
+    print(f"\nEval set : {len(pairs)} pairs  (positive={n_pos}, negative={n_neg})")
+    print(f"Gallery  : bounding_box_test only  [train images never used in evaluation]")
     print(SEP_WIDE)
 
     # ── Run stages ───────────────────────────────────────────────────────────

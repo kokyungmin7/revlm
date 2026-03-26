@@ -69,15 +69,14 @@ def main() -> None:
         print(f"ERROR: no images in {split_dir}/query/")
         return
 
-    pool = (
-        list((split_dir / "bounding_box_train").glob("*.jpg"))
-        + list((split_dir / "bounding_box_test").glob("*.jpg"))
-    )
+    # HITL inference uses train gallery only — keeps test set unseen until evaluation.
+    pool = list((split_dir / "bounding_box_train").glob("*.jpg"))
 
     # Sample up to n_queries
     sampled = random.sample(query_images, min(args.n_queries, len(query_images)))
 
     print(f"Queries to process : {len(sampled)}")
+    print(f"Gallery pool       : bounding_box_train ({len(pool)} images)  [train-only, test kept unseen]")
     print(f"HITL threshold     : {args.threshold}")
     print(f"HITL directory     : {args.hitl_dir}\n")
 

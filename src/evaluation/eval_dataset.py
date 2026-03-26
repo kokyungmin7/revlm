@@ -91,10 +91,8 @@ def build_eval_pairs(
     if not query_images:
         raise ValueError(f"No images in {split_dir}/query/")
 
-    pool = (
-        list((split_dir / "bounding_box_train").glob("*.jpg"))
-        + list((split_dir / "bounding_box_test").glob("*.jpg"))
-    )
+    # Evaluation uses test gallery only — never train images.
+    pool = list((split_dir / "bounding_box_test").glob("*.jpg"))
 
     sampled_queries = rng.sample(query_images, min(n_queries, len(query_images)))
 
