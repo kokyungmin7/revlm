@@ -173,113 +173,121 @@ def run_stage1_reid(pairs, reid_model_name: str, threshold: float = 0.5) -> tupl
     }, predictions
 
 
-def run_stage2_vlm(pairs, hitl_threshold: float) -> tuple[dict, list[bool]]:
-    """Stage 2: VLM verifier (base model, no LoRA)."""
+def _run_vlm_stage(
+    stage_n: int,
+    stage_title: str,
+    pairs,
+    hitl_threshold: float,
+    batch_size: int,
+    lora_adapter_path: str | None = None,
+) -> tuple[dict, list[bool]]:
+    """Shared implementation for Stage 2 and Stage 3 VLM evaluation.
+
+    Args:
+        stage_n: Stage number (2 or 3).
+        stage_title: Human-readable stage title.
+        pairs: List of EvalPair to evaluate.
+        hitl_threshold: Confidence threshold reported in HITL stats (no actual queuing).
+        batch_size: Number of pairs per VLM forward pass.
+        lora_adapter_path: LoRA adapter directory, or None for base model.
+    """
     from src.models.vlm_verifier import load_vlm_verifier
     from src.evaluation.metrics import compute_metrics
 
-    _print_stage_header(2, "VLM verifier (base)")
-    print("  Loading Qwen3-VL-8B-Instruct ...")
+    _print_stage_header(stage_n, stage_title)
+    model_desc = "Qwen3-VL-8B-Instruct"
+    if lora_adapter_path:
+        print(f"  Loading {model_desc} + LoRA from: {lora_adapter_path}")
+    else:
+        print(f"  Loading {model_desc} ...")
+    print(f"  Batch size : {batch_size}")
+
     # hitl_threshold=None: evaluation must NOT write to HITL queue (test data contamination)
-    verifier = load_vlm_verifier(hitl_threshold=None)
+    verifier = load_vlm_verifier(hitl_threshold=None, lora_adapter_path=lora_adapter_path)
 
-    predictions: list[bool] = []
-    labels: list[bool] = []
-    n_queued = 0
-
-    t0 = time.time()
-    for i, pair in enumerate(pairs, 1):
+    # Read all images upfront to filter missing files
+    valid_pairs = []
+    valid_bgr = []
+    for pair in pairs:
         bgr_a = cv2.imread(pair.img_path_a)
         bgr_b = cv2.imread(pair.img_path_b)
         if bgr_a is None or bgr_b is None:
-            print(f"  [WARN] Could not read image for pair {i}, skipping.")
+            print(f"  [WARN] Could not read images for pair ({pair.img_path_a}), skipping.")
             continue
+        valid_pairs.append(pair)
+        valid_bgr.append((bgr_a, bgr_b))
 
-        result = verifier.verify(bgr_a, bgr_b)
-        predictions.append(result.is_same)
-        labels.append(pair.label)
+    predictions: list[bool] = []
+    results_all = []
 
-        queued = result.confidence < hitl_threshold
-        if queued:
-            n_queued += 1
+    t0 = time.time()
+    for batch_start in range(0, len(valid_bgr), batch_size):
+        batch_bgr = valid_bgr[batch_start: batch_start + batch_size]
+        batch_results = verifier.verify_batch(batch_bgr)
+        results_all.extend(batch_results)
+        for r in batch_results:
+            predictions.append(r.is_same)
 
+    labels = [p.label for p in valid_pairs]
+    n_queued = sum(1 for r in results_all if r.confidence < hitl_threshold)
+
+    for i, (pair, result) in enumerate(zip(valid_pairs, results_all), 1):
         _print_pair_result(
-            i, len(pairs),
+            i, len(valid_pairs),
             pair.img_path_a, pair.img_path_b,
             pair.person_id_a, pair.person_id_b,
             pair.label, result.is_same,
             confidence=result.confidence,
             reasoning=result.reasoning,
-            queued=queued,
+            queued=(result.confidence < hitl_threshold),
         )
 
     metrics = compute_metrics(predictions, labels)
     elapsed = time.time() - t0
-    print(f"\n  Processed {len(pairs)} pairs in {elapsed:.1f}s")
-    print(f"  Queued for HITL : {n_queued} pairs (confidence < {hitl_threshold})")
+    print(f"\n  Processed {len(valid_pairs)} pairs in {elapsed:.1f}s  (batch_size={batch_size})")
+    if stage_n == 2:
+        print(f"  Would queue for HITL : {n_queued} pairs (confidence < {hitl_threshold})")
     _print_metrics(metrics)
 
-    return {
-        "stage": 2,
-        "label": "2. VLM verifier (base)",
-        "model": "Qwen3-VL-8B-Instruct",
-        "hitl_threshold": hitl_threshold,
-        "n_queued": n_queued,
+    row: dict = {
+        "stage": stage_n,
+        "label": f"{stage_n}. {stage_title}",
+        "model": model_desc,
+        "batch_size": batch_size,
         "metrics": metrics,
         "elapsed_s": elapsed,
-    }, predictions
+    }
+    if stage_n == 2:
+        row["hitl_threshold"] = hitl_threshold
+        row["n_would_queue"] = n_queued
+    if lora_adapter_path:
+        row["lora_adapter"] = lora_adapter_path
+    return row, predictions
 
 
-def run_stage3_vlm_lora(pairs, lora_adapter_path: str, hitl_threshold: float) -> tuple[dict, list[bool]]:
-    """Stage 3: VLM verifier with LoRA adapter."""
-    from src.models.vlm_verifier import load_vlm_verifier
-    from src.evaluation.metrics import compute_metrics
-
-    _print_stage_header(3, f"VLM + LoRA adapter ({Path(lora_adapter_path).name})")
-    print(f"  Loading Qwen3-VL-8B-Instruct + LoRA from: {lora_adapter_path}")
-    # hitl_threshold=None: evaluation must NOT write to HITL queue (test data contamination)
-    verifier = load_vlm_verifier(
-        hitl_threshold=None,
-        lora_adapter_path=lora_adapter_path,
+def run_stage2_vlm(pairs, hitl_threshold: float, batch_size: int = 1) -> tuple[dict, list[bool]]:
+    """Stage 2: VLM verifier (base model, no LoRA)."""
+    return _run_vlm_stage(
+        stage_n=2,
+        stage_title="VLM verifier (base)",
+        pairs=pairs,
+        hitl_threshold=hitl_threshold,
+        batch_size=batch_size,
     )
 
-    predictions: list[bool] = []
-    labels: list[bool] = []
 
-    t0 = time.time()
-    for i, pair in enumerate(pairs, 1):
-        bgr_a = cv2.imread(pair.img_path_a)
-        bgr_b = cv2.imread(pair.img_path_b)
-        if bgr_a is None or bgr_b is None:
-            print(f"  [WARN] Could not read image for pair {i}, skipping.")
-            continue
-
-        result = verifier.verify(bgr_a, bgr_b)
-        predictions.append(result.is_same)
-        labels.append(pair.label)
-
-        _print_pair_result(
-            i, len(pairs),
-            pair.img_path_a, pair.img_path_b,
-            pair.person_id_a, pair.person_id_b,
-            pair.label, result.is_same,
-            confidence=result.confidence,
-            reasoning=result.reasoning,
-        )
-
-    metrics = compute_metrics(predictions, labels)
-    elapsed = time.time() - t0
-    print(f"\n  Processed {len(pairs)} pairs in {elapsed:.1f}s")
-    _print_metrics(metrics)
-
-    return {
-        "stage": 3,
-        "label": f"3. VLM + HITL LoRA ({Path(lora_adapter_path).name})",
-        "model": "Qwen3-VL-8B-Instruct",
-        "lora_adapter": lora_adapter_path,
-        "metrics": metrics,
-        "elapsed_s": elapsed,
-    }, predictions
+def run_stage3_vlm_lora(
+    pairs, lora_adapter_path: str, hitl_threshold: float, batch_size: int = 1
+) -> tuple[dict, list[bool]]:
+    """Stage 3: VLM verifier with LoRA adapter."""
+    return _run_vlm_stage(
+        stage_n=3,
+        stage_title=f"VLM + LoRA adapter ({Path(lora_adapter_path).name})",
+        pairs=pairs,
+        hitl_threshold=hitl_threshold,
+        batch_size=batch_size,
+        lora_adapter_path=lora_adapter_path,
+    )
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -299,6 +307,8 @@ def main() -> None:
     parser.add_argument("--reid-threshold", type=float, default=0.5,
                         help="Fixed cosine similarity threshold for Stage 1 (default: 0.5)")
     parser.add_argument("--hitl-threshold", type=float, default=0.7)
+    parser.add_argument("--batch-size", type=int, default=4,
+                        help="Number of pairs per VLM forward pass (default: 4)")
     parser.add_argument("--lora-adapter", default="models/vlm_verifier_lora/latest")
     parser.add_argument("--skip-stage", default="",
                         help="Comma-separated stage numbers to skip, e.g. '3'")
@@ -339,7 +349,7 @@ def main() -> None:
         stage_results.append(result1)
 
     if 2 not in skip:
-        result2, _ = run_stage2_vlm(pairs, args.hitl_threshold)
+        result2, _ = run_stage2_vlm(pairs, args.hitl_threshold, batch_size=args.batch_size)
         stage_results.append(result2)
 
     if 3 not in skip:
@@ -348,7 +358,7 @@ def main() -> None:
             print(f"\n[Stage 3 SKIPPED] LoRA adapter not found: {lora_path}")
             print("  Run scripts/lora_train.py first to generate an adapter.")
         else:
-            result3, _ = run_stage3_vlm_lora(pairs, str(lora_path), args.hitl_threshold)
+            result3, _ = run_stage3_vlm_lora(pairs, str(lora_path), args.hitl_threshold, batch_size=args.batch_size)
             stage_results.append(result3)
 
     # ── Summary table ────────────────────────────────────────────────────────

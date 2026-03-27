@@ -201,6 +201,85 @@ class VLMVerifier:
 
         return result
 
+    def verify_batch(
+        self,
+        bgr_pairs: list[tuple[np.ndarray, np.ndarray]],
+        max_new_tokens: int = 256,
+    ) -> list[VerificationResult]:
+        """Verify multiple BGR person crop pairs in a single forward pass.
+
+        Processes all pairs together as a padded batch, which is significantly
+        faster than calling verify() in a loop on GPU.
+
+        Args:
+            bgr_pairs: List of (bgr_a, bgr_b) tuples, each crop in BGR format.
+            max_new_tokens: Maximum tokens to generate per item.
+
+        Returns:
+            List of VerificationResult, one per input pair (same order).
+        """
+        if not bgr_pairs:
+            return []
+
+        # Build one conversation per pair
+        all_messages = []
+        for bgr_a, bgr_b in bgr_pairs:
+            pil_a = Image.fromarray(bgr_a[:, :, ::-1])
+            pil_b = Image.fromarray(bgr_b[:, :, ::-1])
+            all_messages.append([
+                {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": pil_a},
+                        {"type": "image", "image": pil_b},
+                        {"type": "text", "text": USER_PROMPT},
+                    ],
+                },
+            ])
+
+        # Render each conversation to a text string (image placeholders included)
+        texts = [
+            self.processor.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True
+            )
+            for msgs in all_messages
+        ]
+
+        # Collect images in conversation order: 2 per pair
+        images = [
+            Image.fromarray(bgr[:, :, ::-1])
+            for bgr_a, bgr_b in bgr_pairs
+            for bgr in (bgr_a, bgr_b)
+        ]
+
+        # Batch-tokenize with left-padding so all sequences align for generation
+        inputs = self.processor(
+            text=texts,
+            images=images,
+            return_tensors="pt",
+            padding=True,
+        )
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        input_len = inputs["input_ids"].shape[1]
+
+        with torch.no_grad():
+            output_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+
+        # Decode only the generated portion for each item
+        generated_ids = output_ids[:, input_len:]
+        raws = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+        results = []
+        for i, (raw, (bgr_a, bgr_b)) in enumerate(zip(raws, bgr_pairs)):
+            result = _parse_output(raw)
+            if self._hitl is not None and result.confidence < self._hitl_threshold:  # type: ignore[operator]
+                self._hitl.log(bgr_a, bgr_b, result)
+            results.append(result)
+
+        return results
+
 
 def load_vlm_verifier(
     model_id: str = "Qwen/Qwen3-VL-8B-Instruct",
