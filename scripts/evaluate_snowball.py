@@ -35,6 +35,7 @@ Options:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import textwrap
 import time
@@ -45,6 +46,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import torch
 
 
 # ── Per-pair detail record ─────────────────────────────────────────────────────
@@ -620,6 +622,13 @@ def _compute_pairwise_rank1_from_details(details: "list[PairDetail]") -> float:
     return n_wins / n_total if n_total > 0 else 0.0
 
 
+def _flush_gpu() -> None:
+    """Force-release cached GPU memory between stages."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _run_vlm_stage(
     stage_n: int,
     stage_title: str,
@@ -735,6 +744,10 @@ def _run_vlm_stage(
         row["n_would_queue"] = n_queued
     if lora_adapter_path:
         row["lora_adapter"] = lora_adapter_path
+
+    del verifier
+    _flush_gpu()
+
     return row, predictions, details
 
 
@@ -984,6 +997,7 @@ def main() -> None:
         result2["pairwise_rank1"] = _compute_pairwise_rank1_from_details(details2)
         stage_results.append(result2)
         all_details[2] = details2
+        _flush_gpu()
 
     if 3 not in skip:
         lora_path = Path(args.lora_adapter)
