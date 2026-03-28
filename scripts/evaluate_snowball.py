@@ -218,29 +218,37 @@ def _run_vlm_stage(
         valid_bgr.append((bgr_a, bgr_b))
 
     predictions: list[bool] = []
-    results_all = []
+    results_all: list = []
+    n_queued = 0
+    pair_idx = 0
 
     t0 = time.time()
     for batch_start in range(0, len(valid_bgr), batch_size):
         batch_bgr = valid_bgr[batch_start: batch_start + batch_size]
+        batch_end = batch_start + len(batch_bgr)
+        print(f"  Inferring [{batch_end}/{len(valid_bgr)}] ...", flush=True)
+
         batch_results = verifier.verify_batch(batch_bgr)
         results_all.extend(batch_results)
+
         for r in batch_results:
             predictions.append(r.is_same)
+            pair = valid_pairs[pair_idx]
+            queued = r.confidence < hitl_threshold
+            if queued:
+                n_queued += 1
+            _print_pair_result(
+                pair_idx + 1, len(valid_pairs),
+                pair.img_path_a, pair.img_path_b,
+                pair.person_id_a, pair.person_id_b,
+                pair.label, r.is_same,
+                confidence=r.confidence,
+                reasoning=r.reasoning,
+                queued=queued,
+            )
+            pair_idx += 1
 
     labels = [p.label for p in valid_pairs]
-    n_queued = sum(1 for r in results_all if r.confidence < hitl_threshold)
-
-    for i, (pair, result) in enumerate(zip(valid_pairs, results_all), 1):
-        _print_pair_result(
-            i, len(valid_pairs),
-            pair.img_path_a, pair.img_path_b,
-            pair.person_id_a, pair.person_id_b,
-            pair.label, result.is_same,
-            confidence=result.confidence,
-            reasoning=result.reasoning,
-            queued=(result.confidence < hitl_threshold),
-        )
 
     metrics = compute_metrics(predictions, labels)
     elapsed = time.time() - t0
