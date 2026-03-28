@@ -132,6 +132,92 @@ def build_eval_pairs(
     return pairs
 
 
+@dataclass
+class RetrievalQuery:
+    """A retrieval query with its full gallery and ground-truth relevance labels.
+
+    Attributes:
+        query_path:    Absolute path to the query image.
+        query_id:      Person ID of the query image.
+        gallery_paths: Ordered list of gallery image paths (full test gallery).
+        gallery_ids:   Person ID for each gallery image (same order).
+        relevance:     Boolean mask — True where gallery_id == query_id.
+    """
+
+    query_path: str
+    query_id: str
+    gallery_paths: list[str]
+    gallery_ids: list[str]
+    relevance: list[bool]
+
+
+def build_retrieval_queries(
+    data_root: str,
+    n_queries: int = 100,
+    seed: int = 42,
+    split: str | None = None,
+) -> list[RetrievalQuery]:
+    """Build retrieval queries against the full bounding_box_test gallery.
+
+    For each of n_queries sampled query images, the entire test gallery is used
+    as the retrieval pool. Queries whose person ID has no match in the gallery
+    are silently skipped.
+
+    Args:
+        data_root: Root directory of WB_WoB-ReID dataset.
+        n_queries: Number of query images to sample.
+        seed:      Random seed for reproducibility (same as build_eval_pairs).
+        split:     Optional split subdirectory name (e.g., 'both_large').
+
+    Returns:
+        List of RetrievalQuery, one per valid query.
+
+    Raises:
+        FileNotFoundError: If the data root or split directory is not found.
+        ValueError: If no valid queries are available.
+    """
+    rng = random.Random(seed)
+    root = Path(data_root)
+    if not root.exists():
+        raise FileNotFoundError(f"Data root not found: {root}")
+
+    split_dir = _find_split_dir(root, split)
+    query_images = sorted((split_dir / "query").glob("*.jpg"))
+    if not query_images:
+        raise ValueError(f"No images in {split_dir}/query/")
+
+    # Build gallery list once — shared across all queries
+    gallery_paths = sorted((split_dir / "bounding_box_test").glob("*.jpg"))
+    gallery_ids = [_person_id(p) or "unknown" for p in gallery_paths]
+
+    sampled_queries = rng.sample(query_images, min(n_queries, len(query_images)))
+
+    queries: list[RetrievalQuery] = []
+    for query_path in sampled_queries:
+        qid = _person_id(query_path)
+        if qid is None:
+            continue
+        relevance = [gid == qid for gid in gallery_ids]
+        if not any(relevance):
+            continue  # no positives in gallery — skip
+        queries.append(
+            RetrievalQuery(
+                query_path=str(query_path),
+                query_id=qid,
+                gallery_paths=[str(p) for p in gallery_paths],
+                gallery_ids=gallery_ids,
+                relevance=relevance,
+            )
+        )
+
+    if not queries:
+        raise ValueError(
+            f"No valid retrieval queries found under {split_dir}. "
+            "Check that person IDs in query/ match those in bounding_box_test/."
+        )
+    return queries
+
+
 def save_eval_pairs(pairs: list[EvalPair], path: str) -> None:
     """Persist evaluation pairs to a JSONL file.
 
