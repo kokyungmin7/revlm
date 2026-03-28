@@ -221,12 +221,13 @@ class VLMVerifier:
         if not bgr_pairs:
             return []
 
-        # Build one conversation per pair
-        all_messages = []
+        # Tokenize each pair individually (same path as verify()) then left-pad into a batch.
+        # Using tokenize=True per item avoids PIL-serialization issues with tokenize=False.
+        per_item_inputs: list[dict] = []
         for bgr_a, bgr_b in bgr_pairs:
             pil_a = Image.fromarray(bgr_a[:, :, ::-1])
             pil_b = Image.fromarray(bgr_b[:, :, ::-1])
-            all_messages.append([
+            messages = [
                 {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
                 {
                     "role": "user",
@@ -236,33 +237,44 @@ class VLMVerifier:
                         {"type": "text", "text": USER_PROMPT},
                     ],
                 },
-            ])
-
-        # Render each conversation to a text string (image placeholders included)
-        texts = [
-            self.processor.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True
+            ]
+            item = self.processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
             )
-            for msgs in all_messages
-        ]
+            per_item_inputs.append(item)
 
-        # Collect images in conversation order: 2 per pair
-        images = [
-            Image.fromarray(bgr[:, :, ::-1])
-            for bgr_a, bgr_b in bgr_pairs
-            for bgr in (bgr_a, bgr_b)
-        ]
+        # Left-pad input_ids and attention_mask so generation starts at the same position.
+        max_len = max(x["input_ids"].shape[1] for x in per_item_inputs)
+        pad_id = self.processor.tokenizer.pad_token_id or 0
 
-        # Batch-tokenize with left-padding so all sequences align for generation
-        inputs = self.processor(
-            text=texts,
-            images=images,
-            return_tensors="pt",
-            padding=True,
+        padded_ids = torch.full(
+            (len(per_item_inputs), max_len), pad_id, dtype=torch.long
         )
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        padded_mask = torch.zeros(len(per_item_inputs), max_len, dtype=torch.long)
 
-        input_len = inputs["input_ids"].shape[1]
+        for i, item in enumerate(per_item_inputs):
+            seq_len = item["input_ids"].shape[1]
+            padded_ids[i, max_len - seq_len:] = item["input_ids"][0]
+            padded_mask[i, max_len - seq_len:] = item["attention_mask"][0]
+
+        inputs: dict = {"input_ids": padded_ids.to(self.device),
+                        "attention_mask": padded_mask.to(self.device)}
+
+        # pixel_values and image_grid_thw must be concatenated along the batch dim.
+        if "pixel_values" in per_item_inputs[0]:
+            inputs["pixel_values"] = torch.cat(
+                [x["pixel_values"] for x in per_item_inputs], dim=0
+            ).to(self.device)
+        if "image_grid_thw" in per_item_inputs[0]:
+            inputs["image_grid_thw"] = torch.cat(
+                [x["image_grid_thw"] for x in per_item_inputs], dim=0
+            ).to(self.device)
+
+        input_len = max_len
 
         with torch.no_grad():
             output_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
