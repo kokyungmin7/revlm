@@ -1,17 +1,20 @@
 """Run VLM verifier on dataset pairs and populate HITL queue.
 
-Iterates over query images in WB_WoB-ReID, verifies each against a
-positive and a negative, and queues low-confidence results for HITL review.
+Iterates over query images in WB_WoB-ReID, verifies each against ALL
+positives and N sampled negatives per query, queuing low-confidence
+results for HITL review.
 
 Usage:
     uv run python scripts/run_hitl_inference.py [options]
 
 Options:
-    --data-root     Dataset root (default: /home/kokyungmin/data/WB_WoB-ReID)
-    --hitl-dir      HITL data dir (default: data/hitl)
-    --threshold     Queue predictions below this confidence (default: 0.7)
-    --n-queries     Number of query images to process (default: 50)
-    --split         Dataset split subdir name, e.g. 'both_large' (default: auto-detect)
+    --data-root       Dataset root (default: /home/kokyungmin/data/WB_WoB-ReID)
+    --hitl-dir        HITL data dir (default: data/hitl)
+    --threshold       Queue predictions below this confidence (default: 0.7)
+    --n-queries       Number of query images to process (default: 50)
+    --n-negatives     Negative gallery images sampled per query (default: 5)
+    --split           Dataset split subdir name, e.g. 'both_large' (default: auto-detect)
+    --seed            Random seed (default: 42)
 """
 
 from __future__ import annotations
@@ -19,10 +22,10 @@ from __future__ import annotations
 import argparse
 import random
 import re
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
-import numpy as np
 
 _ID_RE = re.compile(r"^(\d+)_c\d+_f\d+\.jpg$", re.IGNORECASE)
 
@@ -46,16 +49,35 @@ def _find_split_dir(root: Path, split: str | None) -> Path:
     return splits[0]
 
 
+def _build_index(pool: list[Path]) -> dict[str, list[Path]]:
+    """Build person_id → image paths index from a flat image list.
+
+    Args:
+        pool: List of image paths following {id}_c{cam}_f{frame}.jpg naming.
+
+    Returns:
+        Dict mapping person ID string to list of image paths.
+    """
+    index: dict[str, list[Path]] = defaultdict(list)
+    for p in pool:
+        pid = _person_id(p)
+        if pid is not None:
+            index[pid].append(p)
+    return dict(index)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Populate HITL queue via VLM inference.")
     parser.add_argument("--data-root", default="/home/kokyungmin/data/WB_WoB-ReID")
     parser.add_argument("--hitl-dir", default="data/hitl")
     parser.add_argument("--threshold", type=float, default=0.7)
     parser.add_argument("--n-queries", type=int, default=50)
+    parser.add_argument("--n-negatives", type=int, default=5,
+                        help="Negative gallery images sampled per query (default: 5)")
     parser.add_argument("--split", default="both_large",
                         choices=["both_large", "both_small", "with_bag", "without_bag"])
     parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducible query sampling (default: 42)")
+                        help="Random seed for reproducible sampling (default: 42)")
     args = parser.parse_args()
 
     root = Path(args.data_root)
@@ -74,12 +96,19 @@ def main() -> None:
     # HITL inference uses train gallery only — keeps test set unseen until evaluation.
     pool = list((split_dir / "bounding_box_train").glob("*.jpg"))
 
+    # Pre-build index: person_id → [image paths]  (eliminates O(pool) scan per query)
+    id_to_images = _build_index(pool)
+    all_ids = sorted(id_to_images.keys())
+
     # Sample up to n_queries (seeded for reproducibility)
     random.seed(args.seed)
     sampled = random.sample(query_images, min(args.n_queries, len(query_images)))
 
+    n_pos_total = sum(len(id_to_images.get(_person_id(q) or "", [])) for q in sampled)
+    n_neg_total = len(sampled) * args.n_negatives
     print(f"Queries to process : {len(sampled)}")
-    print(f"Gallery pool       : bounding_box_train ({len(pool)} images)  [train-only, test kept unseen]")
+    print(f"Gallery pool       : bounding_box_train ({len(pool)} images, {len(all_ids)} identities)")
+    print(f"Pairs planned      : ~{n_pos_total} positives + {n_neg_total} negatives")
     print(f"HITL threshold     : {args.threshold}")
     print(f"HITL directory     : {args.hitl_dir}\n")
 
@@ -94,89 +123,89 @@ def main() -> None:
     queued = 0
     processed = 0
     skipped = 0
-    correct = 0   # VLM prediction matches ground truth
+    correct = 0
     total_pairs = 0
 
     SEP = "─" * 72
 
     for query_path in sampled:
         qid = _person_id(query_path)
-        if qid is None:
+        if qid is None or qid not in id_to_images:
             skipped += 1
             continue
 
-        positives = [p for p in pool if _person_id(p) == qid]
-        negatives = [p for p in pool if _person_id(p) != qid and _person_id(p) is not None]
-        if not positives or not negatives:
+        positives = id_to_images[qid]
+        neg_ids = [pid for pid in all_ids if pid != qid]
+        if not positives or not neg_ids:
             skipped += 1
             continue
 
-        pos_path = random.choice(positives)
-        neg_path = random.choice(negatives)
+        # Sample negatives: pick n_negatives distinct IDs, one image each
+        sampled_neg_ids = random.sample(neg_ids, min(args.n_negatives, len(neg_ids)))
+        negatives = [random.choice(id_to_images[nid]) for nid in sampled_neg_ids]
 
         bgr_q = cv2.imread(str(query_path))
-        bgr_p = cv2.imread(str(pos_path))
-        bgr_n = cv2.imread(str(neg_path))
-
-        if bgr_q is None or bgr_p is None or bgr_n is None:
+        if bgr_q is None:
             skipped += 1
             continue
 
         processed += 1
         h_q, w_q = bgr_q.shape[:2]
-        h_p, w_p = bgr_p.shape[:2]
-        h_n, w_n = bgr_n.shape[:2]
+        n_pairs = len(positives) + len(negatives)
 
         print(SEP)
         print(
             f"[{processed}/{len(sampled)}] Query  person_id={qid}"
             f"  file={query_path.name}  size={w_q}x{h_q}"
+            f"  ({len(positives)} pos + {len(negatives)} neg = {n_pairs} pairs)"
         )
 
-        # ── Positive pair ──────────────────────────────────────────────
-        res_pos = verifier.verify(bgr_q, bgr_p)
-        total_pairs += 1
-        is_queued_pos = res_pos.confidence < args.threshold
-        if is_queued_pos:
-            queued += 1
-        gt_correct_pos = res_pos.is_same  # ground truth: same
-        if gt_correct_pos:
-            correct += 1
+        # ── Positive pairs (all) ────────────────────────────────────────
+        for pos_path in positives:
+            bgr_p = cv2.imread(str(pos_path))
+            if bgr_p is None:
+                continue
 
-        print(
-            f"  [+] Positive  person_id={qid}"
-            f"  file={pos_path.name}  size={w_p}x{h_p}"
-        )
-        print(
-            f"      Prediction : {'SAME      ' if res_pos.is_same else 'DIFFERENT '}"
-            f" (GT: SAME)  {'✓ correct' if gt_correct_pos else '✗ wrong'}"
-        )
-        print(f"      Confidence : {res_pos.confidence:.3f}"
-              + (f"  ← QUEUED (< {args.threshold})" if is_queued_pos else ""))
-        print(f"      Reasoning  : {res_pos.reasoning}")
+            res = verifier.verify(bgr_q, bgr_p)
+            total_pairs += 1
+            is_queued = res.confidence < args.threshold
+            if is_queued:
+                queued += 1
+            if res.is_same:
+                correct += 1
 
-        # ── Negative pair ──────────────────────────────────────────────
-        nid = _person_id(neg_path)
-        res_neg = verifier.verify(bgr_q, bgr_n)
-        total_pairs += 1
-        is_queued_neg = res_neg.confidence < args.threshold
-        if is_queued_neg:
-            queued += 1
-        gt_correct_neg = not res_neg.is_same  # ground truth: different
-        if gt_correct_neg:
-            correct += 1
+            h_p, w_p = bgr_p.shape[:2]
+            print(
+                f"  [+] Positive  file={pos_path.name}  size={w_p}x{h_p}\n"
+                f"      Prediction : {'SAME      ' if res.is_same else 'DIFFERENT '}"
+                f" (GT: SAME)  {'✓' if res.is_same else '✗'}"
+                f"  conf={res.confidence:.3f}"
+                + (f"  ← QUEUED" if is_queued else "")
+            )
 
-        print(
-            f"  [-] Negative  person_id={nid}"
-            f"  file={neg_path.name}  size={w_n}x{h_n}"
-        )
-        print(
-            f"      Prediction : {'SAME      ' if res_neg.is_same else 'DIFFERENT '}"
-            f" (GT: DIFFERENT)  {'✓ correct' if gt_correct_neg else '✗ wrong'}"
-        )
-        print(f"      Confidence : {res_neg.confidence:.3f}"
-              + (f"  ← QUEUED (< {args.threshold})" if is_queued_neg else ""))
-        print(f"      Reasoning  : {res_neg.reasoning}")
+        # ── Negative pairs (sampled) ────────────────────────────────────
+        for neg_path in negatives:
+            nid = _person_id(neg_path)
+            bgr_n = cv2.imread(str(neg_path))
+            if bgr_n is None:
+                continue
+
+            res = verifier.verify(bgr_q, bgr_n)
+            total_pairs += 1
+            is_queued = res.confidence < args.threshold
+            if is_queued:
+                queued += 1
+            if not res.is_same:
+                correct += 1
+
+            h_n, w_n = bgr_n.shape[:2]
+            print(
+                f"  [-] Negative  person_id={nid}  file={neg_path.name}  size={w_n}x{h_n}\n"
+                f"      Prediction : {'SAME      ' if res.is_same else 'DIFFERENT '}"
+                f" (GT: DIFFERENT)  {'✓' if not res.is_same else '✗'}"
+                f"  conf={res.confidence:.3f}"
+                + (f"  ← QUEUED" if is_queued else "")
+            )
 
     from src.models.hitl_collector import HITLCollector
     collector = HITLCollector(args.hitl_dir)
@@ -186,7 +215,7 @@ def main() -> None:
     print(SEP)
     print("\n=== Run Summary ===")
     print(f"  Queries processed : {processed}  (skipped: {skipped})")
-    print(f"  Pairs evaluated   : {total_pairs}  (positive: {processed}, negative: {processed})")
+    print(f"  Pairs evaluated   : {total_pairs}")
     print(f"  VLM accuracy      : {correct}/{total_pairs} = {accuracy:.1%}")
     print(f"  Queued for review : {queued}  (confidence < {args.threshold})")
     print(f"  Total in queue    : {collector.queue_size}")
