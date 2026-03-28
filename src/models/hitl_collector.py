@@ -190,6 +190,50 @@ class HITLCollector:
             for sample in remaining:
                 f.write(json.dumps(asdict(sample)) + "\n")
 
+    def log_labeled(
+        self,
+        bgr_a: np.ndarray,
+        bgr_b: np.ndarray,
+        result: VerificationResult,
+        label: bool,
+    ) -> HITLSample:
+        """Save a prediction with a known GT label directly to labeled.jsonl.
+
+        Used when ground truth is available from the dataset (e.g., filename-based
+        person ID), so human review is not needed.  Wrong predictions are written
+        straight to the training set.
+
+        Args:
+            bgr_a: First person crop in BGR format.
+            bgr_b: Second person crop in BGR format.
+            result: VLM verification result.
+            label: Ground-truth label (True = same person).
+
+        Returns:
+            The created HITLSample (already labeled).
+        """
+        sample_id = str(uuid.uuid4())
+        path_a = str(self._images_dir / f"{sample_id}_a.jpg")
+        path_b = str(self._images_dir / f"{sample_id}_b.jpg")
+
+        cv2.imwrite(path_a, bgr_a)
+        cv2.imwrite(path_b, bgr_b)
+
+        sample = HITLSample(
+            id=sample_id,
+            img_path_a=path_a,
+            img_path_b=path_b,
+            pred_is_same=result.is_same,
+            confidence=result.confidence,
+            reasoning=result.reasoning,
+            label=label,
+        )
+
+        with open(self._labeled_path, "a") as f:
+            f.write(json.dumps(asdict(sample)) + "\n")
+
+        return sample
+
     @property
     def queue_size(self) -> int:
         """Number of pending (unlabeled) samples in the queue."""

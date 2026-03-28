@@ -120,15 +120,16 @@ def main() -> None:
     print(f"HITL threshold     : {args.threshold}")
     print(f"HITL directory     : {args.hitl_dir}\n")
 
-    # Load verifier (heavy — CUDA required)
+    # Load verifier (heavy — CUDA required).
+    # hitl_threshold=None disables confidence-based internal queuing —
+    # we queue based on GT correctness instead.
     from src.models.vlm_verifier import load_vlm_verifier
+    from src.models.hitl_collector import HITLCollector
 
-    verifier = load_vlm_verifier(
-        hitl_threshold=args.threshold,
-        hitl_data_dir=args.hitl_dir,
-    )
+    verifier = load_vlm_verifier(hitl_threshold=None)
+    collector = HITLCollector(args.hitl_dir)
 
-    queued = 0
+    auto_labeled = 0   # wrong predictions queued directly to labeled.jsonl
     processed = 0
     skipped = 0
     correct = 0
@@ -176,19 +177,21 @@ def main() -> None:
 
             res = verifier.verify(bgr_q, bgr_p)
             total_pairs += 1
-            is_queued = res.confidence < args.threshold
-            if is_queued:
-                queued += 1
-            if res.is_same:
+            gt_label = True
+            is_wrong = res.is_same != gt_label
+            if is_wrong:
+                collector.log_labeled(bgr_q, bgr_p, res, gt_label)
+                auto_labeled += 1
+            else:
                 correct += 1
 
             h_p, w_p = bgr_p.shape[:2]
             print(
                 f"  [+] Positive  file={pos_path.name}  size={w_p}x{h_p}\n"
                 f"      Prediction : {'SAME      ' if res.is_same else 'DIFFERENT '}"
-                f" (GT: SAME)  {'✓' if res.is_same else '✗'}"
+                f" (GT: SAME)  {'✓' if not is_wrong else '✗'}"
                 f"  conf={res.confidence:.3f}"
-                + (f"  ← QUEUED" if is_queued else "")
+                + (f"  ← AUTO-LABELED" if is_wrong else "")
             )
 
         # ── Negative pairs (sampled) ────────────────────────────────────
@@ -200,36 +203,34 @@ def main() -> None:
 
             res = verifier.verify(bgr_q, bgr_n)
             total_pairs += 1
-            is_queued = res.confidence < args.threshold
-            if is_queued:
-                queued += 1
-            if not res.is_same:
+            gt_label = False
+            is_wrong = res.is_same != gt_label
+            if is_wrong:
+                collector.log_labeled(bgr_q, bgr_n, res, gt_label)
+                auto_labeled += 1
+            else:
                 correct += 1
 
             h_n, w_n = bgr_n.shape[:2]
             print(
                 f"  [-] Negative  person_id={nid}  file={neg_path.name}  size={w_n}x{h_n}\n"
                 f"      Prediction : {'SAME      ' if res.is_same else 'DIFFERENT '}"
-                f" (GT: DIFFERENT)  {'✓' if not res.is_same else '✗'}"
+                f" (GT: DIFFERENT)  {'✓' if not is_wrong else '✗'}"
                 f"  conf={res.confidence:.3f}"
-                + (f"  ← QUEUED" if is_queued else "")
+                + (f"  ← AUTO-LABELED" if is_wrong else "")
             )
-
-    from src.models.hitl_collector import HITLCollector
-    collector = HITLCollector(args.hitl_dir)
 
     accuracy = correct / total_pairs if total_pairs > 0 else 0.0
 
     print(SEP)
     print("\n=== Run Summary ===")
-    print(f"  Queries processed : {processed}  (skipped: {skipped})")
-    print(f"  Pairs evaluated   : {total_pairs}")
-    print(f"  VLM accuracy      : {correct}/{total_pairs} = {accuracy:.1%}")
-    print(f"  Queued for review : {queued}  (confidence < {args.threshold})")
-    print(f"  Total in queue    : {collector.queue_size}")
-    print(f"  Total labeled     : {collector.labeled_size}")
-    if collector.queue_size > 0:
-        print(f"\nNext step: uv run python scripts/hitl_review.py --data-dir {args.hitl_dir}")
+    print(f"  Queries processed  : {processed}  (skipped: {skipped})")
+    print(f"  Pairs evaluated    : {total_pairs}")
+    print(f"  VLM accuracy       : {correct}/{total_pairs} = {accuracy:.1%}")
+    print(f"  Wrong → auto-labeled : {auto_labeled}  (written to labeled.jsonl)")
+    print(f"  Total labeled      : {collector.labeled_size}")
+    if auto_labeled > 0:
+        print(f"\nNext step: uv run python scripts/lora_train.py --min-samples {auto_labeled}")
 
 
 if __name__ == "__main__":
