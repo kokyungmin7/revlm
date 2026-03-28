@@ -244,20 +244,16 @@ class VLMLoRATrainer:
             gradient_checkpointing=True,
         )
 
-        def formatting_func(example: dict[str, Any]) -> list[str]:
-            text = processor.apply_chat_template(
-                example["messages"],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            return [text]
-
+        # Use the full processor (not just tokenizer) so that image pixel_values
+        # are computed and passed to the model during training.
+        # formatting_func is intentionally omitted — SFTTrainer calls
+        # processor.apply_chat_template internally, which loads images from
+        # the paths stored in each message's {"type": "image", "image": path}.
         trainer = SFTTrainer(
             model=model,
             args=sft_config,
             train_dataset=dataset,
-            processing_class=processor.tokenizer,
-            formatting_func=formatting_func,
+            processing_class=processor,
         )
 
         print("[LoRATrainer] Starting training...")

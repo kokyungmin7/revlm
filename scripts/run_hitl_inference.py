@@ -94,7 +94,15 @@ def main() -> None:
         return
 
     # HITL inference uses train gallery only — keeps test set unseen until evaluation.
-    pool = list((split_dir / "bounding_box_train").glob("*.jpg"))
+    train_gallery_dir = split_dir / "bounding_box_train"
+    if not train_gallery_dir.exists():
+        print(f"ERROR: bounding_box_train/ not found under {split_dir}")
+        print("  HITL inference requires the train gallery to prevent test set contamination.")
+        return
+    pool = list(train_gallery_dir.glob("*.jpg"))
+    if not pool:
+        print(f"ERROR: bounding_box_train/ is empty under {split_dir}")
+        return
 
     # Pre-build index: person_id → [image paths]  (eliminates O(pool) scan per query)
     id_to_images = _build_index(pool)
