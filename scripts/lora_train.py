@@ -16,6 +16,7 @@ Options:
 from __future__ import annotations
 
 import argparse
+import sys
 
 import torch
 
@@ -56,7 +57,8 @@ def main() -> None:
         print(f"\nTraining complete. Adapter saved to: {adapter_path}")
         print(f"To use: load_vlm_verifier(lora_adapter_path='{adapter_path}')")
     else:
-        print("\nTraining skipped (not enough labeled samples or error).")
+        print("\nERROR: Training skipped (not enough labeled samples or image files missing).")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

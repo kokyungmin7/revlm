@@ -1,8 +1,11 @@
 """Run VLM verifier on dataset pairs and populate HITL queue.
 
-Iterates over query images in WB_WoB-ReID, verifies each against ALL
-positives and N sampled negatives per query, queuing low-confidence
-results for HITL review.
+Samples query images from bounding_box_train and verifies each against ALL
+other positives (same person, different image) and N sampled negatives,
+writing wrong predictions directly to labeled.jsonl for LoRA training.
+
+Uses bounding_box_train for both query and gallery to guarantee person ID
+overlap and to keep the test set completely unseen until evaluation.
 
 Usage:
     uv run python scripts/run_hitl_inference.py [options]
@@ -88,12 +91,8 @@ def main() -> None:
     split_dir = _find_split_dir(root, args.split)
     print(f"Using split directory: {split_dir}")
 
-    query_images = sorted((split_dir / "query").glob("*.jpg"))
-    if not query_images:
-        print(f"ERROR: no images in {split_dir}/query/")
-        return
-
-    # HITL inference uses train gallery only — keeps test set unseen until evaluation.
+    # HITL inference uses train gallery for BOTH query and gallery.
+    # This guarantees person ID overlap and keeps test set unseen.
     train_gallery_dir = split_dir / "bounding_box_train"
     if not train_gallery_dir.exists():
         print(f"ERROR: bounding_box_train/ not found under {split_dir}")
@@ -104,18 +103,27 @@ def main() -> None:
         print(f"ERROR: bounding_box_train/ is empty under {split_dir}")
         return
 
-    # Pre-build index: person_id → [image paths]  (eliminates O(pool) scan per query)
+    # Pre-build index: person_id → [image paths]
     id_to_images = _build_index(pool)
     all_ids = sorted(id_to_images.keys())
 
+    # Query candidates: persons with >= 2 images (need at least one positive besides self)
+    query_candidates = [
+        img for pid in all_ids if len(id_to_images[pid]) >= 2
+        for img in id_to_images[pid]
+    ]
+    if not query_candidates:
+        print("ERROR: no person with >= 2 images in bounding_box_train/")
+        return
+
     # Sample up to n_queries (seeded for reproducibility)
     random.seed(args.seed)
-    sampled = random.sample(query_images, min(args.n_queries, len(query_images)))
+    sampled = random.sample(query_candidates, min(args.n_queries, len(query_candidates)))
 
-    n_pos_total = sum(len(id_to_images.get(_person_id(q) or "", [])) for q in sampled)
+    n_pos_total = sum(len(id_to_images.get(_person_id(q) or "", [])) - 1 for q in sampled)
     n_neg_total = len(sampled) * args.n_negatives
     print(f"Queries to process : {len(sampled)}")
-    print(f"Gallery pool       : bounding_box_train ({len(pool)} images, {len(all_ids)} identities)")
+    print(f"Query + Gallery    : bounding_box_train ({len(pool)} images, {len(all_ids)} identities)")
     print(f"Pairs planned      : ~{n_pos_total} positives + {n_neg_total} negatives")
     print(f"HITL threshold     : {args.threshold}")
     print(f"HITL directory     : {args.hitl_dir}\n")
@@ -143,7 +151,8 @@ def main() -> None:
             skipped += 1
             continue
 
-        positives = id_to_images[qid]
+        # Exclude self from positives
+        positives = [p for p in id_to_images[qid] if p != query_path]
         neg_ids = [pid for pid in all_ids if pid != qid]
         if not positives or not neg_ids:
             skipped += 1
@@ -169,7 +178,7 @@ def main() -> None:
             f"  ({len(positives)} pos + {len(negatives)} neg = {n_pairs} pairs)"
         )
 
-        # ── Positive pairs (all) ────────────────────────────────────────
+        # ── Positive pairs (all, excluding self) ─────────────────────
         for pos_path in positives:
             bgr_p = cv2.imread(str(pos_path))
             if bgr_p is None:

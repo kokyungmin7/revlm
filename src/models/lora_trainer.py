@@ -182,7 +182,20 @@ class VLMLoRATrainer:
             print(f"[LoRATrainer] Only {n} labeled samples (min={min_samples}). Skipping.")
             return None
 
-        print(f"[LoRATrainer] Training on {n} samples...")
+        # Validate image paths exist before expensive model loading
+        missing = []
+        for s in samples:
+            for key in ("img_path_a", "img_path_b"):
+                p = s.get(key, "")
+                if not Path(p).exists():
+                    missing.append(p)
+        if missing:
+            print(f"[LoRATrainer] ERROR: {len(missing)} image files not found. First 5:")
+            for m in missing[:5]:
+                print(f"  {m}")
+            return None
+
+        print(f"[LoRATrainer] Training on {n} samples ({n * 2} images verified)...")
 
         # Lazy imports (heavy, CUDA-only)
         from datasets import Dataset

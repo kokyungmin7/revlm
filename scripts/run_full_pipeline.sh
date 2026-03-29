@@ -33,12 +33,16 @@ ts() { date "+%Y-%m-%d %H:%M:%S"; }
 log() { echo "[$(ts)] $*"; }
 
 # ── Pre-flight ─────────────────────────────────────────
-log "Pipeline starting from: $PROJECT_ROOT"
-log "Data root : $DATA_ROOT"
-log "Split     : $SPLIT"
-log "N queries : $N_QUERIES"
-log "N negatives: $N_NEGATIVES"
+# Create log directory BEFORE anything else (needed for tee in tmux)
 mkdir -p experiments/logs
+
+log "Pipeline starting from: $PROJECT_ROOT"
+log "Data root   : $DATA_ROOT"
+log "Split       : $SPLIT"
+log "N queries   : $N_QUERIES"
+log "N negatives : $N_NEGATIVES"
+log "Min samples : $MIN_SAMPLES"
+log "Epochs      : $EPOCHS"
 
 if [[ "$CLEAN" == "1" ]]; then
     log "Cleaning previous HITL data in $HITL_DIR ..."
@@ -53,7 +57,15 @@ uv run python scripts/run_hitl_inference.py \
     --hitl-dir "$HITL_DIR" \
     --n-queries "$N_QUERIES" \
     --n-negatives "$N_NEGATIVES"
-log "Step 1 complete."
+
+# Verify Step 1 produced labeled data
+if [[ ! -f "$HITL_DIR/labeled.jsonl" ]]; then
+    log "ERROR: Step 1 produced no labeled data ($HITL_DIR/labeled.jsonl not found)."
+    log "  Possible cause: no wrong VLM predictions, or person ID mismatch."
+    exit 1
+fi
+N_LABELED=$(wc -l < "$HITL_DIR/labeled.jsonl")
+log "Step 1 complete. Labeled samples: $N_LABELED"
 
 # ── Step 2: LoRA Fine-tuning ──────────────────────────
 log "======== Step 2/3: LoRA Fine-tuning ========"
@@ -62,7 +74,13 @@ uv run python scripts/lora_train.py \
     --output-base "$LORA_OUTPUT" \
     --min-samples "$MIN_SAMPLES" \
     --epochs "$EPOCHS"
-log "Step 2 complete."
+
+# Verify Step 2 produced adapter
+if [[ ! -e "$LORA_OUTPUT/latest" ]]; then
+    log "ERROR: Step 2 did not produce LoRA adapter ($LORA_OUTPUT/latest not found)."
+    exit 1
+fi
+log "Step 2 complete. Adapter: $(readlink "$LORA_OUTPUT/latest")"
 
 # ── Step 3: Snowball Evaluation ────────────────────────
 log "======== Step 3/3: Snowball Evaluation ========"

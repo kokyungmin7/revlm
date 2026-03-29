@@ -74,8 +74,8 @@ class HITLCollector:
             The created HITLSample.
         """
         sample_id = str(uuid.uuid4())
-        path_a = str(self._images_dir / f"{sample_id}_a.jpg")
-        path_b = str(self._images_dir / f"{sample_id}_b.jpg")
+        path_a = str((self._images_dir / f"{sample_id}_a.jpg").resolve())
+        path_b = str((self._images_dir / f"{sample_id}_b.jpg").resolve())
 
         cv2.imwrite(path_a, bgr_a)
         cv2.imwrite(path_b, bgr_b)
@@ -213,8 +213,8 @@ class HITLCollector:
             The created HITLSample (already labeled).
         """
         sample_id = str(uuid.uuid4())
-        path_a = str(self._images_dir / f"{sample_id}_a.jpg")
-        path_b = str(self._images_dir / f"{sample_id}_b.jpg")
+        path_a = str((self._images_dir / f"{sample_id}_a.jpg").resolve())
+        path_b = str((self._images_dir / f"{sample_id}_b.jpg").resolve())
 
         cv2.imwrite(path_a, bgr_a)
         cv2.imwrite(path_b, bgr_b)
