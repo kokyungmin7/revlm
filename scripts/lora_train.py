@@ -4,13 +4,14 @@ Usage:
     uv run python scripts/lora_train.py [options]
 
 Options:
-    --labeled-jsonl   Path to labeled.jsonl (default: data/hitl/labeled.jsonl)
-    --output-base     Base dir for adapters (default: models/vlm_verifier_lora)
-    --model-id        HuggingFace model ID (default: Qwen/Qwen3-VL-8B-Instruct)
-    --min-samples     Minimum labeled examples required (default: 100)
-    --epochs          Training epochs (default: 3)
-    --lora-r          LoRA rank (default: 16)
-    --lora-alpha      LoRA alpha (default: 32)
+    --labeled-jsonl      Path to labeled.jsonl (default: data/hitl/labeled.jsonl)
+    --output-base        Base dir for adapters (default: models/vlm_verifier_lora)
+    --model-id           HuggingFace model ID (default: Qwen/Qwen3-VL-8B-Instruct)
+    --min-samples        Minimum labeled examples required (default: 100)
+    --epochs             Training epochs (default: 3)
+    --lora-r             LoRA rank (default: 16)
+    --lora-alpha         LoRA alpha (default: 32)
+    --eval-split-ratio   Fraction held out for validation (default: 0.1, 0 to disable)
 """
 
 from __future__ import annotations
@@ -34,6 +35,12 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument(
+        "--eval-split-ratio",
+        type=float,
+        default=0.1,
+        help="Fraction of data held out for validation (default: 0.1, set 0 to disable)",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -54,6 +61,7 @@ def main() -> None:
         num_epochs=args.epochs,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
+        eval_split_ratio=args.eval_split_ratio,
     )
 
     if adapter_path:

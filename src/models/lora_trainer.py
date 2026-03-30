@@ -153,6 +153,7 @@ class VLMLoRATrainer:
         lora_dropout: float = 0.05,
         learning_rate: float = 2e-4,
         max_seq_length: int = 2048,
+        eval_split_ratio: float = 0.1,
     ) -> str | None:
         """Fine-tune the VLM on human-labeled HITL examples.
 
@@ -231,6 +232,21 @@ class VLMLoRATrainer:
         ]
         dataset = Dataset.from_list(conversations)
 
+        # Log class balance — single-class data causes training collapse
+        yes_count = sum(1 for s in samples if s["label"])
+        no_count = n - yes_count
+        print(f"[LoRATrainer] Class balance: YES={yes_count} ({yes_count/n:.1%}), NO={no_count} ({no_count/n:.1%})")
+        if yes_count == 0 or no_count == 0:
+            print("[LoRATrainer] WARNING: single-class dataset — training will collapse.")
+
+        # Eval split for monitoring generalization
+        eval_dataset = None
+        if eval_split_ratio > 0.0 and len(dataset) >= 10:
+            split = dataset.train_test_split(test_size=eval_split_ratio, seed=42)
+            dataset = split["train"]
+            eval_dataset = split["test"]
+            print(f"[LoRATrainer] Train: {len(dataset)}, Eval: {len(eval_dataset)}")
+
         # Load base model with SDPA attention for padded multimodal compatibility
         print("[LoRATrainer] Loading base model...")
         model = Qwen3VLForConditionalGeneration.from_pretrained(
@@ -268,14 +284,17 @@ class VLMLoRATrainer:
         output_dir = self._next_version_dir()
         output_dir.mkdir(parents=True)
 
-        # Custom data collator: apply_chat_template + image token label masking.
-        # Masks padding, <|vision_start|>, <|vision_end|>, <|image_pad|> from loss
-        # so the model only learns to generate assistant text.
+        tb_log_dir = str(output_dir / "tb_logs")
+
+        # Custom data collator: apply_chat_template + assistant-only loss masking.
+        # Only computes loss on assistant response tokens (YES/NO + confidence + reasoning).
+        # Masks system prompt, user message, vision tokens, and padding tokens.
         _VISION_TOKEN_IDS = [151652, 151653, 151655]
-        _pad_token_id = processor.tokenizer.pad_token_id
+        _padding_side = processor.tokenizer.padding_side
+        print(f"[LoRATrainer] Tokenizer padding_side: {_padding_side}")
 
         def _collate_fn(examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-            texts = [
+            full_texts = [
                 processor.apply_chat_template(
                     ex["messages"], tokenize=False, add_generation_prompt=False,
                 ).strip()
@@ -283,13 +302,36 @@ class VLMLoRATrainer:
             ]
             image_inputs = [ex["images"] for ex in examples]
             batch = processor(
-                text=texts, images=image_inputs, return_tensors="pt", padding=True,
+                text=full_texts, images=image_inputs, return_tensors="pt", padding=True,
             )
             labels = batch["input_ids"].clone()
-            # Mask padding and vision tokens from loss
-            labels[labels == _pad_token_id] = -100
+
+            # Mask each item: everything up to (and including) the user turn → -100
+            for i, ex in enumerate(examples):
+                # Tokenize only system+user to find where assistant response begins
+                prompt_messages = [m for m in ex["messages"] if m["role"] != "assistant"]
+                prompt_text = processor.apply_chat_template(
+                    prompt_messages, tokenize=False, add_generation_prompt=True,
+                ).strip()
+                prompt_batch = processor(
+                    text=[prompt_text], images=[ex["images"]], return_tensors="pt", padding=False,
+                )
+                prompt_len = prompt_batch["input_ids"].shape[1]
+
+                # Account for left-padding: find where actual tokens start in padded row
+                total_len = batch["input_ids"].shape[1]
+                if _padding_side == "left":
+                    seq_len = int(batch["attention_mask"][i].sum().item())
+                    pad_len = total_len - seq_len
+                    labels[i, : pad_len + prompt_len] = -100
+                else:
+                    labels[i, :prompt_len] = -100
+
+            # Also mask vision token IDs (safety net — already covered by prompt masking,
+            # but guards against any future format where vision tokens appear elsewhere)
             for tid in _VISION_TOKEN_IDS:
                 labels[labels == tid] = -100
+
             batch["labels"] = labels
             return batch
 
@@ -304,19 +346,23 @@ class VLMLoRATrainer:
             lr_scheduler_type="constant",
             max_grad_norm=0.3,
             bf16=True,
-            logging_steps=10,
+            logging_steps=5,
             save_strategy="epoch",
+            eval_strategy="epoch" if eval_dataset is not None else "no",
             remove_unused_columns=False,
             dataset_text_field=None,
             gradient_checkpointing=True,
             gradient_checkpointing_kwargs={"use_reentrant": False},
             dataset_kwargs={"skip_prepare_dataset": True},
+            report_to="tensorboard",
+            logging_dir=tb_log_dir,
         )
 
         trainer = SFTTrainer(
             model=model,
             args=sft_config,
             train_dataset=dataset,
+            eval_dataset=eval_dataset,
             data_collator=_collate_fn,
             processing_class=processor,
         )
@@ -329,4 +375,6 @@ class VLMLoRATrainer:
         self._update_latest_symlink(output_dir)
 
         print(f"[LoRATrainer] Adapter saved to: {output_dir}")
+        print(f"[LoRATrainer] TensorBoard logs: {tb_log_dir}")
+        print(f"[LoRATrainer] To view training curves: tensorboard --logdir {tb_log_dir}")
         return str(output_dir)
