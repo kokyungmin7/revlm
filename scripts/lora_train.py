@@ -29,6 +29,8 @@ def main() -> None:
     parser.add_argument("--output-base", default="models/vlm_verifier_lora")
     parser.add_argument("--model-id", default="Qwen/Qwen3-VL-8B-Instruct")
     parser.add_argument("--min-samples", type=int, default=100)
+    parser.add_argument("--max-samples", type=int, default=100,
+                        help="Randomly sample up to N examples for training (default: 100)")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
@@ -48,6 +50,7 @@ def main() -> None:
     adapter_path = trainer.train(
         labeled_jsonl=args.labeled_jsonl,
         min_samples=args.min_samples,
+        max_samples=args.max_samples,
         num_epochs=args.epochs,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,

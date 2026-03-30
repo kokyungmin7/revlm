@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +144,7 @@ class VLMLoRATrainer:
         self,
         labeled_jsonl: str = "data/hitl/labeled.jsonl",
         min_samples: int = 100,
+        max_samples: int | None = None,
         num_epochs: int = 3,
         per_device_batch_size: int = 1,
         gradient_accumulation_steps: int = 8,
@@ -157,6 +159,7 @@ class VLMLoRATrainer:
         Args:
             labeled_jsonl: Path to labeled.jsonl from HITLCollector.
             min_samples: Skip training if fewer examples available.
+            max_samples: Randomly sample up to this many examples. None = use all.
             num_epochs: Training epochs.
             per_device_batch_size: Per-device batch size.
             gradient_accumulation_steps: Gradient accumulation steps.
@@ -186,6 +189,12 @@ class VLMLoRATrainer:
         if n < min_samples:
             print(f"[LoRATrainer] Only {n} labeled samples (min={min_samples}). Skipping.")
             return None
+
+        if max_samples is not None and n > max_samples:
+            random.shuffle(samples)
+            samples = samples[:max_samples]
+            print(f"[LoRATrainer] Sampled {max_samples} from {n} labeled examples.")
+            n = max_samples
 
         # Validate image paths exist before expensive model loading
         missing = []
