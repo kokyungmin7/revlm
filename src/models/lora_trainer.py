@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from PIL import Image
 
 from src.models.vlm_verifier import SYSTEM_PROMPT as _SYSTEM_PROMPT, USER_PROMPT as _USER_PROMPT
 
@@ -66,7 +67,7 @@ def _build_conversation(
         reasoning: Original VLM reasoning (passed to assistant text).
 
     Returns:
-        Conversation dict with 'messages' key.
+        Conversation dict with 'messages' and 'images' keys.
     """
     return {
         "messages": [
@@ -77,8 +78,8 @@ def _build_conversation(
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": img_path_a},
-                    {"type": "image", "image": img_path_b},
+                    {"type": "image"},
+                    {"type": "image"},
                     {"type": "text", "text": _USER_PROMPT},
                 ],
             },
@@ -86,7 +87,11 @@ def _build_conversation(
                 "role": "assistant",
                 "content": [{"type": "text", "text": _label_to_assistant_text(label, confidence, reasoning)}],
             },
-        ]
+        ],
+        "images": [
+            Image.open(img_path_a).convert("RGB"),
+            Image.open(img_path_b).convert("RGB"),
+        ],
     }
 
 
