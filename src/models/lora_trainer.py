@@ -253,7 +253,7 @@ class VLMLoRATrainer:
             save_strategy="epoch",
             remove_unused_columns=False,
             dataset_text_field=None,
-            max_seq_length=max_seq_length,
+            max_length=max_seq_length,
             gradient_checkpointing=True,
         )
 
