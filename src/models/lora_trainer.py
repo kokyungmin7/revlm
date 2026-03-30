@@ -218,6 +218,7 @@ class VLMLoRATrainer:
         from trl import SFTConfig, SFTTrainer
 
         # Build conversation dataset — use original VLM confidence/reasoning when available
+        print("[LoRATrainer] Loading images into dataset...")
         conversations = [
             _build_conversation(
                 s["img_path_a"],
@@ -230,22 +231,34 @@ class VLMLoRATrainer:
         ]
         dataset = Dataset.from_list(conversations)
 
-        # Load base model
+        # Load base model with SDPA attention for padded multimodal compatibility
         print("[LoRATrainer] Loading base model...")
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             self.model_id,
             torch_dtype=torch.bfloat16,
             device_map=self.device,
+            attn_implementation="sdpa",
         )
-        processor = AutoProcessor.from_pretrained(self.model_id)
 
-        # Apply LoRA
+        # Processor with constrained image resolution for ReID crops.
+        # ReID crops are small (e.g. 64x128), so we limit token count
+        # to prevent OOM from dynamic resolution expansion.
+        processor = AutoProcessor.from_pretrained(
+            self.model_id,
+            min_pixels=128 * 28 * 28,
+            max_pixels=512 * 28 * 28,
+        )
+
+        # Apply LoRA — attention + MLP layers, vision encoder excluded
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+            target_modules=[
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ],
             bias="none",
         )
         model = get_peft_model(model, lora_config)
@@ -255,6 +268,31 @@ class VLMLoRATrainer:
         output_dir = self._next_version_dir()
         output_dir.mkdir(parents=True)
 
+        # Custom data collator: apply_chat_template + image token label masking.
+        # Masks padding, <|vision_start|>, <|vision_end|>, <|image_pad|> from loss
+        # so the model only learns to generate assistant text.
+        _VISION_TOKEN_IDS = [151652, 151653, 151655]
+        _pad_token_id = processor.tokenizer.pad_token_id
+
+        def _collate_fn(examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+            texts = [
+                processor.apply_chat_template(
+                    ex["messages"], tokenize=False, add_generation_prompt=False,
+                ).strip()
+                for ex in examples
+            ]
+            image_inputs = [ex["images"] for ex in examples]
+            batch = processor(
+                text=texts, images=image_inputs, return_tensors="pt", padding=True,
+            )
+            labels = batch["input_ids"].clone()
+            # Mask padding and vision tokens from loss
+            labels[labels == _pad_token_id] = -100
+            for tid in _VISION_TOKEN_IDS:
+                labels[labels == tid] = -100
+            batch["labels"] = labels
+            return batch
+
         # SFT training config
         sft_config = SFTConfig(
             output_dir=str(output_dir),
@@ -262,24 +300,24 @@ class VLMLoRATrainer:
             per_device_train_batch_size=per_device_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
             learning_rate=learning_rate,
+            warmup_ratio=0.03,
+            lr_scheduler_type="constant",
+            max_grad_norm=0.3,
             bf16=True,
             logging_steps=10,
             save_strategy="epoch",
             remove_unused_columns=False,
             dataset_text_field=None,
-            max_length=max_seq_length,
             gradient_checkpointing=True,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+            dataset_kwargs={"skip_prepare_dataset": True},
         )
 
-        # Use the full processor (not just tokenizer) so that image pixel_values
-        # are computed and passed to the model during training.
-        # formatting_func is intentionally omitted — SFTTrainer calls
-        # processor.apply_chat_template internally, which loads images from
-        # the paths stored in each message's {"type": "image", "image": path}.
         trainer = SFTTrainer(
             model=model,
             args=sft_config,
             train_dataset=dataset,
+            data_collator=_collate_fn,
             processing_class=processor,
         )
 
